@@ -1,0 +1,87 @@
+[package]
+name = "finance-manager"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "finance-manager"
+path = "src/main.rs"
+
+[[bin]]
+name = "test-import"
+path = "src/bin/test_import.rs"
+
+[lib]
+name = "finance_manager"
+path = "src/lib.rs"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower = { version = "0.4" }
+
+# Database
+sqlx = { version = "0.7", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "rust_decimal",
+    "json",
+    "migrate",
+] }
+
+# Auth / JWT
+jsonwebtoken = "9"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+# Excel parsing
+calamine = { version = "0.24", features = ["dates"] }
+
+# Data types
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Crypto / hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# String / Unicode
+unicode-normalization = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async
+futures = "0.3"
+
+[dev-dependencies]
+# 테스트 전용: EdDSA 키 생성 및 JWT 인코딩
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+# tower HTTP 테스트 helper
+tower = { version = "0.4", features = ["util"] }
+# axum test helper
+axum-test-helper = { version = "0.4", default-features = false }
+# HTTP 바디/응답 처리
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["full"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -46,4 +46,9 @@ model: sonnet
 
 > 이 절은 `documentation` 에이전트가 사용자 지시·작업 결과에 따라 누적 업데이트한다. 다른 에이전트·메인은 직접 수정하지 않는다. 형식: `- YYYY-MM-DD: <한줄 핵심> — <왜/언제 적용>`
 
-(아직 없음)
+- 2026-04-25: access/refresh 모두 httpOnly+SameSite=Lax 쿠키, refresh path='/' — prod에서만 Secure 추가
+- 2026-04-25: middleware는 getSetCookie + request.cookies.set + NextResponse.next({request}) Next15 패턴 — 표준 미들웨어 갱신 방식
+- 2026-04-25: lib/api.ts는 "import 'server-only'" 가드 — 클라이언트 번들 노출 방지
+- 2026-04-25: /api/import route handler는 stream forward (runtime=nodejs, dynamic=force-dynamic, duplex:"half") — multipart 스트리밍
+- 2026-04-25: 자동 401 재시도 금지 — middleware가 사전 refresh 책임
+- 2026-04-25: 패키지 매니저 npm + package-lock.json 고정 — pnpm 아님

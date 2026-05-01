@@ -48,4 +48,8 @@ model: sonnet
 
 > 이 절은 `documentation` 에이전트가 사용자 지시·작업 결과에 따라 누적 업데이트한다. 다른 에이전트·메인은 직접 수정하지 않는다. 형식: `- YYYY-MM-DD: <한줄 핵심> — <왜/언제 적용>`
 
-(아직 없음)
+- 2026-04-25: 카테고리 kind는 항상 'expense'로 자동 생성, "차감"만 review_state='confirmed'로 보호 — 도메인 규칙상 자동 생성 카테고리는 expense만, income은 M2 UI에서 사용자 확정
+- 2026-04-25: 임포트 파이프라인은 단일 트랜잭션, pipeline.rs 함수는 &mut PgConnection 받음 — 실패 시 자동 rollback, 멱등성 SHA-256
+- 2026-04-25: multipart length limit 초과 → 413 매핑(MultipartError.status() 위임) — 20MB 한도
+- 2026-04-25: dead code는 #[allow(dead_code)] 명시 — 미래 M2/M3 엔드포인트 용도
+- 2026-04-25: sqlx 23505(Unique violation) → AppError::Conflict(409) 매핑 — 파일 중복 임포트 시

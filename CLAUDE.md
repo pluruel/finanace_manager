@@ -68,6 +68,13 @@ finance_mananger/
 - 인증: middleware.ts에서 access 만료 시 `/auth/refresh`, 실패 시 `/login`
 - 자세한 라우트: [PLAN.md §4](./PLAN.md) 참조
 
+### M1 구현 현황
+- **마이그레이션**: 2개 (`001_init.sql` 스키마 전체 + pgcrypto, `002_fix_settlement_view.sql` 정산 뷰 수정)
+- **백엔드 엔드포인트**: `/health` (헬스체크), `POST /api/import` (xlsx 임포트, multipart, 20MB 한도, 멱등성 SHA-256, 단일 트랜잭션), `GET /api/transactions` (필터, 그룹 응답, 재귀 자식)
+- **프론트엔드 라우트**: `/login`, `/(app)/` (대시보드), `/transactions` (필터·정렬·그룹 펼침), `/import` (업로드 + 결과 표 + 무결성 경고), `/aliases` (M2 placeholder), `/price-history` (M3 placeholder)
+- **테스트**: 백엔드 `cargo test` 34 passed, 프론트 `npm test` 58 passed
+- **검증**: 골든 데이터 `2026년 02월.xlsx` 177건 삽입, v_monthly_settlement deducted_amount=7500 일치, 모든 그룹 무결성 검증 0행
+
 ---
 
 ## 배포 — Docker Compose
@@ -97,6 +104,10 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 3. `docker compose up -d server web`
 4. 헬스체크: server `/health` 200, web `/` 렌더링
 
+### 테스트 실행 방법
+- **백엔드**: `cd server && cargo test -p server` (DATABASE_URL 필요, 임시 테스트 DB 자동 생성)
+- **프론트엔드**: `cd web && npm test` (vitest, 58 tests)
+
 ---
 
 ## 핵심 도메인 규칙 (PLAN에서 발췌)
@@ -107,8 +118,8 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 - 금액은 `numeric(15,2)` 사용. f64 금지.
 - Excel serial → DATE: epoch는 **1899-12-30** (1900-02-29 버그 회피).
 - 음수 지출은 `sign = -1`로 저장 (별도 테이블로 가르지 않음).
-- single-line 그룹 → `transactions` 1행. multi-line 그룹 → 헤더는 만들지 않고 **자식 N개만** 라인으로 저장.
-- 카테고리 `"차감"`은 `sign=+1`로 저장하되 정산 산출에서는 `v_monthly_settlement` 뷰가 분리.
+- single-line 그룹 → `transactions` 1행. multi-line 그룹 → 헤더 1행 + 자식 N행 = (1+N)행 저장.
+- 카테고리 `"차감"`은 임포트 파이프라인에서 자동 생성(kind='expense', review_state='confirmed' 보호). `sign=+1`로 저장하되 정산 산출에서는 `v_monthly_settlement` 뷰가 분리.
 
 자세한 스키마·엔드포인트·정규화 파이프라인·마일스톤은 [PLAN.md](./PLAN.md)에 있다. **PLAN.md가 단일 소스다** — 충돌 시 PLAN을 따른다.
 
@@ -116,7 +127,7 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 
 ## 마일스톤 요약
 
-- **M1**: 부트스트랩 + 임포트 (`2026년 02월.xlsx`로 282건 삽입, 그룹 합계 무결성 0행)
+- **M1**: 부트스트랩 + 임포트 — ✅ 완료 (2026-04-25). `2026년 02월.xlsx` 177건 삽입, 그룹 합계 무결성 0행, 테스트 통과
 - **M2**: 정규화 UI + 월별 대시보드 + 정산 카드 (`v_monthly_settlement`)
 - **M3**: 가격 추적 + 구매처 통계 + 다중 월 통합
 
