@@ -70,3 +70,14 @@ pub struct UnresolvedAlias {
     pub norm_key: String,
 }
 
+/// 결제수단 도메인 엔티티 (M2 API 응답용)
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone)]
+pub struct PaymentMethod {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub name: String,
+    /// 소유자 actor_id (NULL = 미매핑, 사용자가 M2 UI에서 지정)
+    pub actor_id: Option<Uuid>,
+}
+

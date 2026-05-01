@@ -45,7 +45,10 @@ multi-line 패턴 3종:
 핵심 원칙: **모든 도메인 테이블에 `owner_id uuid NOT NULL`, FK 없음**. 임포트 데이터는 `transactions_raw`(원본 보존)와 `transactions`(정규화 참조) 양쪽으로 저장.
 
 ```sql
--- 가계부 내부 사용자(공동/엉아/아기) — 로그인 계정과 무관한 라벨
+-- 가계부 내부 사용자(공동/엉아/아기) — 로그인 계정과 무관한 라벨.
+-- 공동: 엉아(배우자)와 본인이 함께한 공동 지출
+-- 엉아: 배우자를 위한 지출
+-- 아기: 아기를 위한 지출
 CREATE TABLE ledger_actors (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id    uuid NOT NULL,
@@ -83,9 +86,14 @@ CREATE TABLE products (
   UNIQUE (owner_id, merchant_id, name)
 );
 
+-- 결제수단: 공동 카드는 없다. 모든 결제수단은 엉아 또는 아기 소유.
+-- 아기 소유: 농협, 신한아기, 롯데, 삼성, 국민, 비씨, 현대, 현금아기
+-- 엉아 소유: 현금, 신한, 하나, 씨티클, 현금엉아
+-- 집계 시트(103~110행): G열=엉아 결제수단, J열=아기 결제수단
 CREATE TABLE payment_methods (
   id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id  uuid NOT NULL,
+  actor_id  uuid REFERENCES ledger_actors(id),  -- 결제수단 소유자 (엉아 또는 아기)
   name      text NOT NULL,
   UNIQUE (owner_id, name)
 );
@@ -174,7 +182,18 @@ CREATE INDEX ON transactions (owner_id, group_id);
   - **multi-line 그룹**: 헤더 행도 transactions에 1 row 생성. 자식 N개도 별도 라인으로 저장. 총 (1+N)개 라인. (헤더의 `total_amount`는 자식 합과 중복이지만 데이터 무결성 검증 차원에서 보존. single-line과의 통일성 위해 헤더도 라인으로 저장.)
 - **"차감" 카테고리**: 임포트 파이프라인에서 자동 생성(kind='expense', review_state='confirmed' 보호). 영수증 합계 무결성을 위해 `sign=+1`로 저장하지만 정산 산출에선 분리. 공동 결제·개인 귀속이라는 모순적 성격을 카테고리 이름으로 식별.
 
-### 정산 뷰 (M2)
+### 정산 흐름 및 뷰 (M2)
+
+매달의 정산 흐름:
+1. 월급을 공동 계좌에 전액 입금
+2. 한 달간 모든 지출을 액터별(공동/엉아/아기)로 분류하며 엑셀에 기록
+3. 월말에 엑셀 집계 시트에서 액터별 합산 → 공동은 반반, 개인은 각자 부담으로 계산
+4. 차액을 한번에 정산 (공동 카테고리 차감 행은 "가계 룰(외식 15,000원까지 인정)" 같은 한도 초과분)
+5. 엑셀 집계 시트 산식: "경비인정 - 차감 = 입금액" (이 정산 결과)
+
+`v_monthly_settlement` 뷰는 이 정산 결과를 SQL로 재현한다. 핵심은 **"누가 누구를 위해 얼마를 썼는가"를 파악**하고, 공동 지출에 대한 공정한 배분을 계산하는 것이다.
+
+#### 정산 뷰 (M2)
 
 차감을 분리한 공동 정산 산출 — 집계 시트의 "경비인정 / 차감 / 입금액" 산식을 SQL로 재현.
 

@@ -1,7 +1,10 @@
 -- Enable pgcrypto for gen_random_uuid()
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
--- 가계부 내부 사용자(공동/엉아/아기) — 로그인 계정과 무관한 라벨
+-- 가계부 내부 사용자(공동/엉아/아기) — 로그인 계정과 무관한 라벨.
+-- 공동: 엉아(배우자)와 본인이 함께한 공동 지출
+-- 엉아: 배우자를 위한 지출
+-- 아기: 아기를 위한 지출
 CREATE TABLE ledger_actors (
   id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id  uuid NOT NULL,
@@ -39,10 +42,14 @@ CREATE TABLE products (
   UNIQUE (owner_id, merchant_id, name)
 );
 
+-- 결제수단: 공동 카드는 없다. 모든 결제수단은 엉아 또는 아기 소유.
+-- 아기 소유: 농협, 신한아기, 롯데, 삼성, 국민, 비씨, 현대, 현금아기
+-- 엉아 소유: 현금, 신한, 하나, 씨티클, 현금엉아
 CREATE TABLE payment_methods (
   id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id  uuid NOT NULL,
   name      text NOT NULL,
+  actor_id  uuid REFERENCES ledger_actors(id),  -- 결제수단 소유자 (NULL=미매핑)
   UNIQUE (owner_id, name)
 );
 
@@ -122,15 +129,23 @@ CREATE INDEX transactions_group_idx ON transactions (owner_id, group_id);
 
 -- 정산 뷰: 차감을 분리한 공동 정산 산출
 -- 집계 시트의 "경비인정 / 차감 / 입금액" 산식을 SQL로 재현
+-- recognized_expense: 공동 actor의 일반 지출 (차감 제외)
+-- deducted_amount: 차감 카테고리 총합 (actor 무관)
+-- settlement_input: recognized_expense - deducted_amount
 CREATE VIEW v_monthly_settlement AS
 SELECT
   t.owner_id,
   date_trunc('month', t.occurred_on)::date AS month,
-  SUM(CASE WHEN c.name = '차감' THEN 0 ELSE t.amount END)
-    FILTER (WHERE actor.name = '공동' AND t.sign = 1)         AS recognized_expense,
-  SUM(t.amount) FILTER (WHERE c.name = '차감')                AS deducted_amount,
-  SUM(CASE WHEN c.name = '차감' THEN -t.amount ELSE t.amount END)
-    FILTER (WHERE actor.name = '공동' AND t.sign = 1)         AS settlement_input
+  -- 공동 actor의 일반 지출 (차감 제외)
+  COALESCE(SUM(t.amount) FILTER (WHERE actor.name = '공동' AND t.sign = 1 AND c.name <> '차감'), 0)
+    AS recognized_expense,
+  -- 차감 카테고리 총합 (actor 무관)
+  COALESCE(SUM(t.amount) FILTER (WHERE c.name = '차감'), 0)
+    AS deducted_amount,
+  -- 입금액 = 경비인정 - 차감
+  COALESCE(SUM(t.amount) FILTER (WHERE actor.name = '공동' AND t.sign = 1 AND c.name <> '차감'), 0)
+  - COALESCE(SUM(t.amount) FILTER (WHERE c.name = '차감'), 0)
+    AS settlement_input
 FROM transactions t
 JOIN categories c         ON c.id     = t.category_id
 JOIN ledger_actors actor  ON actor.id = t.actor_id
