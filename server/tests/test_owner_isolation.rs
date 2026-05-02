@@ -205,7 +205,10 @@ fn sqlx_unique_violation_maps_to_conflict() {
     use axum::response::IntoResponse;
     use axum::http::StatusCode;
 
-    let err = AppError::Conflict("Duplicate record".to_string());
+    let err = AppError::Conflict(serde_json::json!({
+        "error": "duplicate_record",
+        "message": "Duplicate record",
+    }));
     let response = err.into_response();
     assert_eq!(
         response.status(),

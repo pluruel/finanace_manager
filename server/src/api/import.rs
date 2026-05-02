@@ -128,9 +128,10 @@ pub async fn handle_import(
         Some(id) => id,
         None => {
             // tx 드롭 → 자동 rollback (실제로 아무것도 삽입된 게 없음)
-            return Err(AppError::Conflict(
-                "This file has already been imported (same SHA-256 hash)".to_string(),
-            ));
+            return Err(AppError::Conflict(serde_json::json!({
+                "error": "duplicate_import",
+                "message": "This file has already been imported (same SHA-256 hash).",
+            })));
         }
     };
 

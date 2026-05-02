@@ -108,6 +108,53 @@ export const SettlementSchema = z.object({
 
 export type Settlement = z.infer<typeof SettlementSchema>;
 
+// ─── Review Queue / Alias schemas (M2 Step C) ──────────────────────────────
+// server/src/api/aliases.rs: AliasInfo, ReviewQueueItem, MergeCandidate,
+// PostAliasResponse
+
+export const AliasInfoSchema = z.object({
+  alias_id: z.string().uuid(),
+  raw_text: z.string(),
+  norm_key: z.string(),
+});
+
+export type AliasInfo = z.infer<typeof AliasInfoSchema>;
+
+export const MergeCandidateSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+});
+
+export type MergeCandidate = z.infer<typeof MergeCandidateSchema>;
+
+export const ReviewQueueItemSchema = z.object({
+  scope: z.string(),
+  id: z.string().uuid(),
+  name: z.string(),
+  review_state: z.string(),
+  raw_texts: z.array(AliasInfoSchema),
+  merge_candidates: z.array(MergeCandidateSchema),
+});
+
+export type ReviewQueueItem = z.infer<typeof ReviewQueueItemSchema>;
+
+export const ReviewQueueResponseSchema = z.array(ReviewQueueItemSchema);
+
+export const PostAliasResponseSchema = z.object({
+  created: z.boolean(),
+  remapped_transaction_count: z.number().int(),
+  orphan_deleted: z.boolean(),
+});
+
+export type PostAliasResponse = z.infer<typeof PostAliasResponseSchema>;
+
+export const ConfirmEntityResponseSchema = z.object({
+  id: z.string().uuid(),
+  review_state: z.string(),
+});
+
+export type ConfirmEntityResponse = z.infer<typeof ConfirmEntityResponseSchema>;
+
 // ─── 필터 파라미터 ──────────────────────────────────────────────────────────
 export const TransactionFilterSchema = z.object({
   from: z.string().optional(),

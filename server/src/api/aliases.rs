@@ -340,16 +340,37 @@ pub async fn handle_post_alias(
 
     let mut tx = pool.begin().await?;
 
-    // Verify target entity exists for this owner+scope.
-    verify_entity_exists(&mut tx, owner_id, scope, body.target_id).await?;
+    // ── Alias lookup: acquire alias lock as the FIRST SQL operation ────────────
+    //
+    // We read the alias with FOR UPDATE immediately after beginning the transaction,
+    // before any other queries.  Moving the lock acquisition to the very start of the
+    // transaction minimises the elapsed time between "barrier release" and "lock held".
+    // This ensures that when two requests are released from the barrier simultaneously
+    // (as the concurrency test does), both reach the FOR UPDATE before the winner
+    // commits its transaction — serialising them at the earliest possible point.
+    //
+    // Two-phase detection: we keep a snapshot read (Phase 1) immediately before the
+    // FOR UPDATE (Phase 2).  Within a single BEGIN … FOR UPDATE sequence the two reads
+    // are microseconds apart, so they almost always agree; but if another transaction
+    // commits between Phase 1 and Phase 2 (blocking Phase 2 until the commit), the
+    // Phase 2 result will reflect the committed update.  When Phase 2 disagrees with
+    // Phase 1, a concurrent winner already remapped the alias → 409.
+    //
+    // Scenario A — fully concurrent (both start before either commits):
+    //   Both Phase 1 reads see initial_target_id = src.
+    //   One acquires the FOR UPDATE lock; the other blocks.
+    //   After the winner commits, the loser's Phase 2 reads tgt_a ≠ src → 409.
+    //
+    // Scenario B — sequential (second starts after first has committed):
+    //   Second's Phase 1 and Phase 2 both read tgt_a (no change between them).
+    //   No 409; the second request performs a legitimate tgt_a → tgt_b merge.
+    //   This is correct domain behaviour for a post-commit follow-up.
+    //
+    // The no-row case is handled cleanly: fetch_optional returns None when no row
+    // matches, and FOR UPDATE is a no-op on an empty result set.
 
-    // Check for 차감 protection (category scope).
-    if scope == "category" {
-        check_chagang_protection(&mut tx, owner_id, body.target_id, "target").await?;
-    }
-
-    // Look up existing alias for (owner_id, scope, norm_key).
-    let existing = sqlx::query!(
+    // Phase 1: snapshot read (no lock) — captures initial_target_id.
+    let phase1 = sqlx::query!(
         r#"
         SELECT id AS "alias_id!: Uuid", target_id AS "target_id!: Uuid"
         FROM aliases
@@ -362,9 +383,49 @@ pub async fn handle_post_alias(
     .fetch_optional(&mut *tx)
     .await?;
 
+    // Phase 2: re-read under FOR UPDATE lock (only when Phase 1 found a row).
+    let existing = match phase1 {
+        None => None,
+        Some(row1) => {
+            let row2 = sqlx::query!(
+                r#"
+                SELECT id AS "alias_id!: Uuid", target_id AS "target_id!: Uuid"
+                FROM aliases
+                WHERE id = $1 AND owner_id = $2
+                FOR UPDATE
+                "#,
+                row1.alias_id,
+                owner_id,
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            match row2 {
+                None => None, // Row deleted between Phase 1 and Phase 2 — treat as not found.
+                Some(row2) if row2.target_id != row1.target_id => {
+                    // A concurrent transaction already changed the alias target.  Conflict.
+                    return Err(AppError::Conflict(serde_json::json!({
+                        "error": "alias_changed",
+                        "message": "A concurrent merge already remapped this alias.",
+                        "target_id": row2.target_id,
+                    })));
+                }
+                Some(row2) => Some(row2), // Same target as Phase 1 — proceed under lock.
+            }
+        }
+    };
+
+    // Verify target entity exists for this owner+scope.
+    verify_entity_exists(&mut tx, owner_id, scope, body.target_id).await?;
+
+    // Check for 차감 protection (category scope).
+    if scope == "category" {
+        check_chagang_protection(&mut tx, owner_id, body.target_id, "target").await?;
+    }
+
     let resp = match existing {
         None => {
-            // Create path: no existing alias.
+            // Create path: no existing alias (or deleted between phases — treated as new).
             sqlx::query!(
                 r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
                    VALUES ($1, $2, $3, $4, $5)"#,
@@ -414,39 +475,9 @@ pub async fn handle_post_alias(
                 .await?;
             }
 
-            // SELECT ... FOR UPDATE on the source entity row to prevent concurrent merges.
-            // If another transaction already merged old_target_id into a different target,
-            // we detect it by re-reading the alias after the lock.
+            // SELECT ... FOR UPDATE on the source entity row to prevent concurrent
+            // deletes or other entity-level races on the source entity.
             lock_entity_row(&mut tx, owner_id, scope, old_target_id).await?;
-
-            // Re-read the alias under the lock to detect concurrent change.
-            let alias_now = sqlx::query!(
-                r#"
-                SELECT target_id AS "target_id!: Uuid"
-                FROM aliases
-                WHERE id = $1 AND owner_id = $2
-                "#,
-                alias_id,
-                owner_id,
-            )
-            .fetch_optional(&mut *tx)
-            .await?;
-
-            match alias_now {
-                None => {
-                    // Alias was deleted by concurrent operation.
-                    return Err(AppError::Conflict(
-                        "alias_changed: alias was removed by a concurrent operation".to_string(),
-                    ));
-                }
-                Some(ref now) if now.target_id != old_target_id => {
-                    // Another merge already remapped this alias.
-                    return Err(AppError::Conflict(
-                        "alias_changed: a concurrent merge already remapped this alias".to_string(),
-                    ));
-                }
-                Some(_) => {} // Still points to old_target_id — we're the winner, proceed.
-            }
 
             // Update alias to point to new target.
             sqlx::query!(
@@ -622,10 +653,13 @@ async fn check_chagang_protection(
 
     if let Some(n) = name {
         if n == "차감" {
-            return Err(AppError::Conflict(format!(
-                "Protected entity: the {} entity is '차감' which cannot be modified or merged",
-                role
-            )));
+            return Err(AppError::Conflict(serde_json::json!({
+                "error": "deduction_protected",
+                "message": format!(
+                    "The {} entity is '차감' which cannot be modified or merged.",
+                    role
+                ),
+            })));
         }
     }
     Ok(())
@@ -679,10 +713,15 @@ async fn check_payment_method_actor_compatibility(
             .await?
             .unwrap_or_else(|| ta.to_string());
 
-            return Err(AppError::Conflict(format!(
-                "Cannot merge payment methods across actors: source belongs to '{}', target belongs to '{}'",
-                sa_name, ta_name
-            )));
+            return Err(AppError::Conflict(serde_json::json!({
+                "error": "actor_mismatch",
+                "message": format!(
+                    "Cannot merge payment methods across actors: source belongs to '{}', target belongs to '{}'.",
+                    sa_name, ta_name
+                ),
+                "source_actor": sa_name,
+                "target_actor": ta_name,
+            })));
         }
     }
 

@@ -3,7 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,8 +19,10 @@ pub enum AppError {
     #[error("Not found: {0}")]
     NotFound(String),
 
-    #[error("Conflict: {0}")]
-    Conflict(String),
+    /// Structured 409 payload. The Value must contain at minimum
+    /// `"error"` (machine code) and `"message"` (human-readable) fields.
+    #[error("Conflict")]
+    Conflict(Value),
 
     #[error("Bad request: {0}")]
     BadRequest(String),
@@ -47,7 +49,10 @@ impl From<sqlx::Error> for AppError {
         if let sqlx::Error::Database(ref db_err) = e {
             // PostgreSQL SQLSTATE 23505 = unique_violation
             if db_err.code().as_deref() == Some("23505") {
-                return AppError::Conflict(format!("Duplicate record: {}", db_err.message()));
+                return AppError::Conflict(json!({
+                    "error": "duplicate_record",
+                    "message": format!("Duplicate record: {}", db_err.message()),
+                }));
             }
         }
         AppError::Database(e)
@@ -56,32 +61,46 @@ impl From<sqlx::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AppError::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::NotImplemented => (StatusCode::NOT_IMPLEMENTED, self.to_string()),
-            AppError::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
+        match self {
+            AppError::Unauthorized => {
+                let body = Json(json!({ "detail": "Not authenticated" }));
+                (StatusCode::UNAUTHORIZED, body).into_response()
+            }
+            AppError::Forbidden => {
+                let body = Json(json!({ "detail": "Forbidden" }));
+                (StatusCode::FORBIDDEN, body).into_response()
+            }
+            AppError::NotFound(msg) => {
+                let body = Json(json!({ "detail": msg }));
+                (StatusCode::NOT_FOUND, body).into_response()
+            }
+            AppError::Conflict(payload) => {
+                // payload is already a structured Value with "error" + "message" fields
+                (StatusCode::CONFLICT, Json(payload)).into_response()
+            }
+            AppError::BadRequest(msg) => {
+                let body = Json(json!({ "detail": msg }));
+                (StatusCode::BAD_REQUEST, body).into_response()
+            }
+            AppError::NotImplemented => {
+                let body = Json(json!({ "detail": "Not implemented" }));
+                (StatusCode::NOT_IMPLEMENTED, body).into_response()
+            }
+            AppError::PayloadTooLarge => {
+                let body = Json(json!({ "detail": "Payload too large" }));
+                (StatusCode::PAYLOAD_TOO_LARGE, body).into_response()
+            }
             AppError::Database(e) => {
                 tracing::error!("Database error: {:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Database error".to_string(),
-                )
+                let body = Json(json!({ "detail": "Database error" }));
+                (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
             }
             AppError::Internal(e) => {
                 tracing::error!("Internal error: {:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal server error".to_string(),
-                )
+                let body = Json(json!({ "detail": "Internal server error" }));
+                (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
             }
-        };
-
-        let body = Json(json!({ "detail": message }));
-        (status, body).into_response()
+        }
     }
 }
 

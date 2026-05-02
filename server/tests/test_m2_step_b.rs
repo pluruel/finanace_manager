@@ -656,12 +656,24 @@ async fn payment_method_cross_actor_merge_rejected(pool: PgPool) {
 
     let resp_body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
-    // The error detail should mention both actors.
-    let detail = json["detail"].as_str().unwrap_or("");
-    assert!(
-        detail.contains("엉아") && detail.contains("아기"),
-        "error detail should name both actors: {}",
-        detail
+    // Structured error: code must be "actor_mismatch", actors named in dedicated fields.
+    assert_eq!(
+        json["error"].as_str(),
+        Some("actor_mismatch"),
+        "error code must be actor_mismatch, got: {}",
+        json
+    );
+    assert_eq!(
+        json["source_actor"].as_str(),
+        Some("엉아"),
+        "source_actor must be '엉아', got: {}",
+        json
+    );
+    assert_eq!(
+        json["target_actor"].as_str(),
+        Some("아기"),
+        "target_actor must be '아기', got: {}",
+        json
     );
 }
 

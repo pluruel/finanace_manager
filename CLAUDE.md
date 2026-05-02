@@ -76,7 +76,15 @@ finance_mananger/
 - **Domain enforcement**: 차감 protected from modify/merge; payment_method merge rejects cross-actor targets (409).
 - **Tests**: 60 passed (+11 new in `test_m2_step_b.rs`); concurrency test proves only one of two simultaneous merges succeeds, other 409s; regression test imports golden file, merges, asserts `v_monthly_settlement` unchanged.
 
-**Steps C/D pending**: Frontend `/aliases` page + dashboard integration.
+**Step C ✅ (2026-05-02, with one pending backend fix)**: Frontend `/aliases` page — 4 tabs (Category / Merchant / Payment / Product).
+- **Files**: `web/app/(app)/aliases/page.tsx` (server component, per-tab fetch), `web/components/aliases-tab-content.tsx` (client component, interactions), `web/app/api/aliases-proxy/route.ts` and `web/app/api/entities-proxy/[scope]/[id]/confirm/route.ts` (token-isolating proxies). Schemas in `web/lib/schemas.ts`. shadcn primitives `web/components/ui/{tabs,dialog}.tsx`.
+- **Actions**: Confirm as new (optimistic), Merge into existing (candidates list), Delete alias (confirmation dialog). Optimistic UI with `safeParse` warning toast on response-shape drift; `router.refresh()` after every success so dependent pages pick up the change.
+- **Backend 409 contract refactor**: `AppError::Conflict(String)` → `AppError::Conflict(serde_json::Value)`. Conflict responses now return `{error, message, ...extras}`. Codes: `actor_mismatch` (+ `source_actor`/`target_actor`), `alias_changed` (+ `target_id`), `deduction_protected`, `same_target`, `duplicate_record`, `duplicate_import`. Frontend keys off `error` field — no regex parsing.
+- **Tests**: frontend 69 passed (was 58; +11 in `web/__tests__/aliases.test.tsx`). Backend 60 passed in `--test-threads=1`.
+- **⚠ Pending backend fix**: `concurrent_merges_one_winner` in `server/tests/test_m2_step_b.rs` is flaky in parallel mode. Root cause: initial alias read in `handle_post_alias` (`server/src/api/aliases.rs:~352`) lacks `SELECT ... FOR UPDATE`. Add it and re-run `cargo test -p server` 3× in parallel to verify. See PLAN.md M2 Step C for full diagnosis.
+- **Known limitation**: `GET /api/review-queue?scope=payment_method` always returns `[]` (no `review_state` column on `payment_methods`). Payment tab renders the empty-state until a migration adds `review_state` or the tab is removed.
+
+**Step D pending**: Dashboard (settlement card + Category × Actor pivot + recent transactions) at `web/app/(app)/page.tsx`.
 
 ---
 
