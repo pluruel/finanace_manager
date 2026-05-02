@@ -520,7 +520,8 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
         let body = serde_json::json!({
             "scope": "merchant",
             "raw_text": "소스가맹",
-            "target_id": tgt_a_id
+            "target_id": tgt_a_id,
+            "source_id": src_id
         });
         let req = Request::builder()
             .method("POST")
@@ -559,7 +560,8 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
         let body = serde_json::json!({
             "scope": "merchant",
             "raw_text": "소스가맹",
-            "target_id": tgt_b_id
+            "target_id": tgt_b_id,
+            "source_id": src_id
         });
         let req = Request::builder()
             .method("POST")

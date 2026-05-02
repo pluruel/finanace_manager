@@ -31,11 +31,12 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ detail: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { action, scope, raw_text, target_id } = body as {
+  const { action, scope, raw_text, target_id, source_id } = body as {
     action?: string;
     scope?: string;
     raw_text?: string;
     target_id?: string;
+    source_id?: string;
   };
 
   if (action === "merge") {
@@ -54,7 +55,7 @@ export async function POST(request: NextRequest) {
           "Content-Type": "application/json",
           Cookie: `Authorization=Bearer ${accessToken}`,
         },
-        body: JSON.stringify({ scope, raw_text, target_id }),
+        body: JSON.stringify({ scope, raw_text, target_id, source_id }),
       });
     } catch (err) {
       console.error("[api/aliases-proxy] POST fetch error:", err);

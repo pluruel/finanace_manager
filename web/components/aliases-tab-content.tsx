@@ -125,6 +125,7 @@ function MergeDialog({
             scope,
             raw_text: rawText,
             target_id: selectedTargetId,
+            source_id: item.id,
           }),
         });
 

@@ -58,33 +58,8 @@ finance_mananger/
 - Auth: middleware.ts calls `/auth/refresh` on access expiry; redirects to `/login` on failure.
 - Detailed routes: see [PLAN.md §4](./PLAN.md).
 
-### M1 Implementation Status
-- **Migrations**: 1 (`001_init.sql` full schema + pgcrypto, including `v_monthly_settlement`).
-- **Backend endpoints**: `/health` (health check), `POST /api/import` (xlsx import, multipart, 20 MB limit, SHA-256 idempotency, single transaction), `GET /api/transactions` (filters, grouped response, recursive children).
-- **Frontend routes**: `/login`, `/(app)/` (dashboard), `/transactions` (filter / sort / group expand), `/import` (upload + result table + integrity warnings), `/aliases` (M2 placeholder), `/price-history` (M3 placeholder).
-- **Tests**: backend `cargo test` 34 passed, frontend `npm test` 58 passed.
-- **Verification**: golden file `2026년 02월.xlsx` inserts 177 rows; `v_monthly_settlement` reports `deducted_amount = 7500` (matches Excel); group-integrity check returns 0 rows.
-
 ### M2 Implementation Status
-**Step A ✅ (2026-05-02)**: Atomic upserts + read-only endpoints.
-- **Atomic upserts**: all entities use `INSERT ... ON CONFLICT DO NOTHING RETURNING` + fallback `SELECT`. Categories and products rely on partial unique indexes (`categories_owner_name_root_uniq`, `categories_owner_parent_name_uniq`, `products_owner_merchant_name_uniq`, `products_owner_name_no_merchant_uniq`) to make ON CONFLICT atomic for nullable columns.
-- **Backend endpoints**: `GET /api/categories`, `GET /api/merchants`, `GET /api/payment-methods` (with actor join), `GET /api/summary/:year/:month` (category × actor pivot), `GET /api/settlement/:year/:month` (v_monthly_settlement read-only).
-- **Tests**: 49 passed (2 concurrency tests with `tokio::sync::Barrier`); settlement confirmed `deducted_amount = 7500` for Feb 2026.
-
-**Step B ✅ (2026-05-02)**: Alias CRUD + review queue + auto-remap (backend).
-- **New endpoints**: `GET /api/review-queue?scope=<scope>` (list pending entities with raw_text, norm_key, merge_candidates), `POST /api/aliases` (atomic create/merge in one transaction, with row-level locking to prevent race conditions), `DELETE /api/aliases/:id` (alias-only), `POST /api/entities/:scope/:id/confirm` (flip `review_state` to confirmed; rejects 차감).
-- **Domain enforcement**: 차감 protected from modify/merge; payment_method merge rejects cross-actor targets (409).
-- **Tests**: 60 passed (+11 new in `test_m2_step_b.rs`); concurrency test proves only one of two simultaneous merges succeeds, other 409s; regression test imports golden file, merges, asserts `v_monthly_settlement` unchanged.
-
-**Step C ✅ (2026-05-02, with one pending backend fix)**: Frontend `/aliases` page — 4 tabs (Category / Merchant / Payment / Product).
-- **Files**: `web/app/(app)/aliases/page.tsx` (server component, per-tab fetch), `web/components/aliases-tab-content.tsx` (client component, interactions), `web/app/api/aliases-proxy/route.ts` and `web/app/api/entities-proxy/[scope]/[id]/confirm/route.ts` (token-isolating proxies). Schemas in `web/lib/schemas.ts`. shadcn primitives `web/components/ui/{tabs,dialog}.tsx`.
-- **Actions**: Confirm as new (optimistic), Merge into existing (candidates list), Delete alias (confirmation dialog). Optimistic UI with `safeParse` warning toast on response-shape drift; `router.refresh()` after every success so dependent pages pick up the change.
-- **Backend 409 contract refactor**: `AppError::Conflict(String)` → `AppError::Conflict(serde_json::Value)`. Conflict responses now return `{error, message, ...extras}`. Codes: `actor_mismatch` (+ `source_actor`/`target_actor`), `alias_changed` (+ `target_id`), `deduction_protected`, `same_target`, `duplicate_record`, `duplicate_import`. Frontend keys off `error` field — no regex parsing.
-- **Tests**: frontend 69 passed (was 58; +11 in `web/__tests__/aliases.test.tsx`). Backend 60 passed in `--test-threads=1`.
-- **⚠ Pending backend fix**: `concurrent_merges_one_winner` in `server/tests/test_m2_step_b.rs` is flaky in parallel mode. Root cause: initial alias read in `handle_post_alias` (`server/src/api/aliases.rs:~352`) lacks `SELECT ... FOR UPDATE`. Add it and re-run `cargo test -p server` 3× in parallel to verify. See PLAN.md M2 Step C for full diagnosis.
-- **Known limitation**: `GET /api/review-queue?scope=payment_method` always returns `[]` (no `review_state` column on `payment_methods`). Payment tab renders the empty-state until a migration adds `review_state` or the tab is removed.
-
-**Step D pending**: Dashboard (settlement card + Category × Actor pivot + recent transactions) at `web/app/(app)/page.tsx`.
+M2 is in progress. Steps A/B/C are done; Step D (dashboard) is pending. For full per-step details — endpoints, files touched, test counts, known limitations — see [PLAN.md §6](./PLAN.md). Do not duplicate that content here.
 
 ---
 
