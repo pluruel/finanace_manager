@@ -2,25 +2,16 @@
 
 월별 엑셀(`YYYY년 MM월.xlsx`)을 PostgreSQL에 누적해 카테고리·구매처·상품을 정규화하고 단가 시계열·정산을 보여주는 통합 뷰어. 입력은 계속 엑셀에서 한다.
 
-## 메인 에이전트 운영 규칙 (반드시 준수)
+## 작업 워크플로
 
-> **메인 에이전트는 코드를 직접 작성·수정하지 않는다.** 코드 변경 또는 에이전트가 수행할 작업이 요청되면 메인은 **(1) 적절한 서브에이전트에게 작업을 전달하고**, **(2) 결과가 올바르게 반영되었는지 확인**하는 역할만 수행한다.
+코드 변경 작업은 다음 순서로 진행한다.
 
-### 위임 규칙
-- 백엔드(Rust/server) 작업 → `backend` 서브에이전트
-- 프론트엔드(Next.js/web) 작업 → `frontend` 서브에이전트
-- 모든 코드 변경 직후 → `reviewer` 서브에이전트 (Opus, 코드 품질·보안·계약 위반 검토)
-- 리뷰 통과 후 → `tester` 서브에이전트 (테스트 코드 작성 + 실행 + 통과 확인)
-- 구현 상황 변경 시 → `documentation` 서브에이전트 (CLAUDE.md를 현재 구현에 맞게 업데이트)
+1. **구현**: 백엔드(`server/`)·프론트엔드(`web/`) 코드를 직접 작성·수정한다.
+2. **리뷰**: 변경 후 품질·보안·MSA 계약 위반·도메인 규칙 위반을 스스로 점검한다.
+3. **테스트**: 백엔드 `cargo test -p server`, 프론트 `npm test`를 실행해 통과를 확인한다.
+4. **문서화**: 구현 상태가 바뀌면 CLAUDE.md를 최신 상태로 업데이트한다.
 
-### 워크플로 (모든 작업에 적용)
-1. **위임**: 작업 분류에 맞는 서브에이전트 호출 (backend / frontend)
-2. **리뷰**: 작업이 끝나면 즉시 `reviewer`에게 변경 사항 검토 요청
-3. **테스트**: 리뷰 후 `tester`가 테스트 코드 작성 및 실행, 통과 확인
-4. **문서화**: 구현 상태가 바뀌었으면 `documentation`에게 CLAUDE.md 업데이트 요청
-5. **검증**: 메인은 각 단계의 산출물이 실제 파일/실행에 반영됐는지 확인 (직접 코드 작성·수정 금지)
-
-이 순서를 건너뛰지 않는다. 리뷰·테스트가 통과하기 전에 다음 작업으로 넘어가지 않는다.
+리뷰·테스트가 통과하기 전에 다음 작업으로 넘어가지 않는다.
 
 ---
 
@@ -49,10 +40,9 @@ finance_mananger/
   PLAN.md                    # 초기 구현 계획 (단일 소스)
   docker-compose.yml         # postgres:17 + server + web
   .env.example
-  server/                    # Rust(axum) 백엔드 — backend 에이전트 담당
-  web/                       # Next.js 15 App Router 프론트 — frontend 에이전트 담당
+  server/                    # Rust(axum) 백엔드
+  web/                       # Next.js 15 App Router 프론트
   2026년 02월.xlsx            # M1 임포트 골든 케이스
-  .claude/agents/            # 서브에이전트 정의
 ```
 
 ### 백엔드 (`server/`, Rust + axum)
@@ -160,17 +150,3 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 - **M1**: 부트스트랩 + 임포트 — ✅ 완료 (2026-04-25). `2026년 02월.xlsx` 177건 삽입, 그룹 합계 무결성 0행, 테스트 통과
 - **M2**: 정규화 UI + 월별 대시보드 + 정산 카드 (`v_monthly_settlement`)
 - **M3**: 가격 추적 + 구매처 통계 + 다중 월 통합
-
----
-
-## 서브에이전트 일람
-
-| 이름 | 모델 | 역할 |
-| --- | --- | --- |
-| `backend` | sonnet | Rust/axum 서버 코드 작성·수정 |
-| `frontend` | sonnet | Next.js/web 코드 작성·수정 |
-| `reviewer` | opus | 변경된 코드의 품질·보안·MSA 계약 위반 리뷰 |
-| `tester` | sonnet | 테스트 코드 작성 + 실행 + 통과 검증 |
-| `documentation` | haiku | 현재 구현 상태에 맞춰 CLAUDE.md 업데이트 |
-
-각 정의는 `.claude/agents/<name>.md`에 있다.
