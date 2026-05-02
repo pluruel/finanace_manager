@@ -430,7 +430,12 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 - Five new endpoints: `GET /api/categories`, `GET /api/merchants`, `GET /api/payment-methods` (with actor join), `GET /api/summary/:year/:month` (category × actor pivot, no deduction subtraction; `LEFT JOIN ledger_actors` to surface NULL actor as "(미지정)"), `GET /api/settlement/:year/:month` (v_monthly_settlement read-only).
 - Tests: 49 passed (↑ 2 real concurrency tests with `tokio::sync::Barrier`); settlement test confirmed `deducted_amount = 7500` for Feb 2026.
 
-**Step B (pending)**: Alias CRUD + review queue + auto-remap (backend).
+**Step B (✅ 2026-05-02)**: Alias CRUD + review queue + auto-remap (backend).
+- New module `server/src/api/aliases.rs` (530 lines) with 4 handlers: `GET /api/review-queue?scope=...`, `POST /api/aliases` (atomic create/merge), `DELETE /api/aliases/:id`, `POST /api/entities/:scope/:id/confirm`.
+- Merge concurrency safeguard: row-level `SELECT ... FOR UPDATE` on source entity + alias re-read under lock; 409 on `alias_changed` if another merge moved it. 차감 category protected. Payment method merge rejects cross-actor targets.
+- Tests: 60 passed (+11 new); concurrency test with `tokio::sync::Barrier` confirms single-winner semantics; regression test (golden file import + merge) confirms `v_monthly_settlement` unchanged.
+
+**Original Step B spec (pending frontend implementation)**:
 - New endpoints in `server/src/api/aliases.rs`:
   - `GET /api/review-queue?scope=category|merchant|payment_method|actor|product` — list entities with `review_state='pending'` (joined with their primary alias rows so the UI sees raw_text + norm_key + current target). Cross-scope when `?scope` omitted. Includes a `merge_candidates` field per row: other entities with the same `norm_key` ± edit-distance ≤ 1, scoped to the same owner.
   - `POST /api/aliases` — body `{scope, raw_text, target_id}`. Two behaviors in a single endpoint, both atomic in one transaction:

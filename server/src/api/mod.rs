@@ -1,3 +1,4 @@
+pub mod aliases;
 pub mod categories;
 pub mod import;
 pub mod settlement;
@@ -8,7 +9,7 @@ pub mod transactions;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use sqlx::PgPool;
@@ -32,8 +33,15 @@ pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
         .route("/api/price-history", get(handle_price_history))
         .route("/api/products", get(handle_products))
         .route("/api/merchant-stats", get(handle_merchant_stats))
-        .route("/api/aliases", get(handle_aliases).post(handle_aliases).delete(handle_aliases))
-        .route("/api/review-queue", get(handle_review_queue))
+        // M2 Step B: alias CRUD
+        .route("/api/aliases", post(aliases::handle_post_alias))
+        .route("/api/aliases/:id", delete(aliases::handle_delete_alias))
+        .route("/api/review-queue", get(aliases::handle_get_review_queue))
+        // M2 Step B: entity confirm
+        .route(
+            "/api/entities/:scope/:id/confirm",
+            post(aliases::handle_confirm_entity),
+        )
         .route("/api/categories", get(categories::handle_get_categories))
         .route("/api/merchants", get(categories::handle_get_merchants))
         .route("/api/payment-methods", get(categories::handle_get_payment_methods))

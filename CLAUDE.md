@@ -65,11 +65,18 @@ finance_mananger/
 - **Tests**: backend `cargo test` 34 passed, frontend `npm test` 58 passed.
 - **Verification**: golden file `2026년 02월.xlsx` inserts 177 rows; `v_monthly_settlement` reports `deducted_amount = 7500` (matches Excel); group-integrity check returns 0 rows.
 
-### M2 Implementation Status (Step A: Atomic upserts + read-only endpoints)
+### M2 Implementation Status
+**Step A ✅ (2026-05-02)**: Atomic upserts + read-only endpoints.
 - **Atomic upserts**: all entities use `INSERT ... ON CONFLICT DO NOTHING RETURNING` + fallback `SELECT`. Categories and products rely on partial unique indexes (`categories_owner_name_root_uniq`, `categories_owner_parent_name_uniq`, `products_owner_merchant_name_uniq`, `products_owner_name_no_merchant_uniq`) to make ON CONFLICT atomic for nullable columns.
-- **Backend endpoints**: `GET /api/categories` (list with id/name/kind/review_state/parent_id), `GET /api/merchants` (list with id/name/review_state), `GET /api/payment-methods` (with actor join), `GET /api/summary/:year/:month` (category × actor pivot; `LEFT JOIN ledger_actors` surfaces unmatched rows as "(미지정)"), `GET /api/settlement/:year/:month` (v_monthly_settlement read-only).
-- **Tests**: backend `cargo test` 49 passed (2 real concurrency tests using `tokio::sync::Barrier`); settlement test confirmed `deducted_amount = 7500` for Feb 2026.
-- **Status**: Step A ✅ done (2026-05-02); Steps B/C/D pending.
+- **Backend endpoints**: `GET /api/categories`, `GET /api/merchants`, `GET /api/payment-methods` (with actor join), `GET /api/summary/:year/:month` (category × actor pivot), `GET /api/settlement/:year/:month` (v_monthly_settlement read-only).
+- **Tests**: 49 passed (2 concurrency tests with `tokio::sync::Barrier`); settlement confirmed `deducted_amount = 7500` for Feb 2026.
+
+**Step B ✅ (2026-05-02)**: Alias CRUD + review queue + auto-remap (backend).
+- **New endpoints**: `GET /api/review-queue?scope=<scope>` (list pending entities with raw_text, norm_key, merge_candidates), `POST /api/aliases` (atomic create/merge in one transaction, with row-level locking to prevent race conditions), `DELETE /api/aliases/:id` (alias-only), `POST /api/entities/:scope/:id/confirm` (flip `review_state` to confirmed; rejects 차감).
+- **Domain enforcement**: 차감 protected from modify/merge; payment_method merge rejects cross-actor targets (409).
+- **Tests**: 60 passed (+11 new in `test_m2_step_b.rs`); concurrency test proves only one of two simultaneous merges succeeds, other 409s; regression test imports golden file, merges, asserts `v_monthly_settlement` unchanged.
+
+**Steps C/D pending**: Frontend `/aliases` page + dashboard integration.
 
 ---
 
@@ -154,5 +161,11 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 ## Milestone Summary
 
 - **M1**: Bootstrap + import — ✅ done (2026-04-25). 177 rows inserted from `2026년 02월.xlsx`, group-sum integrity 0 rows, tests passing.
-- **M2**: Normalization UI + monthly dashboard + settlement card. Step A ✅ (atomic upserts + read-only endpoints, 2026-05-02). Steps B/C/D pending.
+- **M2**: Normalization UI + monthly dashboard + settlement card. Steps A/B ✅ (2026-05-02). Steps C/D pending.
 - **M3**: Price tracking + merchant statistics + multi-month aggregation.
+
+---
+
+## Cumulative Context (Documentation Agent)
+
+- 2026-05-02: M2 Step B complete — alias CRUD, review queue, auto-remap backend done; merge uses SELECT FOR UPDATE + alias re-read under lock for race safety (memoed in project MEMORY.md for future reference)
