@@ -19,8 +19,7 @@ CREATE TABLE categories (
   name         text NOT NULL,                   -- 정규화 후의 표준명
   kind         text NOT NULL CHECK (kind IN ('income','expense')),
   review_state text NOT NULL DEFAULT 'pending'
-               CHECK (review_state IN ('pending','confirmed')),
-  UNIQUE (owner_id, parent_id, name)
+               CHECK (review_state IN ('pending','confirmed'))
 );
 
 CREATE TABLE merchants (
@@ -38,8 +37,7 @@ CREATE TABLE products (
   merchant_id  uuid REFERENCES merchants(id),  -- NULL 허용: "구매처 무관 상품"도 표현 가능
   name         text NOT NULL,                  -- 정규화 후의 표준 상품명
   review_state text NOT NULL DEFAULT 'pending'
-               CHECK (review_state IN ('pending','confirmed')),
-  UNIQUE (owner_id, merchant_id, name)
+               CHECK (review_state IN ('pending','confirmed'))
 );
 
 -- 결제수단: 공동 카드는 없다. 모든 결제수단은 엉아 또는 아기 소유.
@@ -64,6 +62,20 @@ CREATE TABLE aliases (
   UNIQUE (owner_id, scope, norm_key)
 );
 CREATE INDEX aliases_lookup_idx ON aliases (owner_id, scope, norm_key);
+
+-- Partial unique indexes for categories and products.
+-- PostgreSQL treats two NULLs as distinct in ordinary UNIQUE constraints, so
+-- (owner_id, NULL, name) duplicates would not be caught. Partial indexes close
+-- that gap and enable ON CONFLICT targeting without advisory locks.
+CREATE UNIQUE INDEX categories_owner_name_root_uniq
+  ON categories (owner_id, name) WHERE parent_id IS NULL;
+CREATE UNIQUE INDEX categories_owner_parent_name_uniq
+  ON categories (owner_id, parent_id, name) WHERE parent_id IS NOT NULL;
+
+CREATE UNIQUE INDEX products_owner_merchant_name_uniq
+  ON products (owner_id, merchant_id, name) WHERE merchant_id IS NOT NULL;
+CREATE UNIQUE INDEX products_owner_name_no_merchant_uniq
+  ON products (owner_id, name) WHERE merchant_id IS NULL;
 
 -- 임포트 배치 추적 (재임포트 시 멱등성 확보)
 CREATE TABLE import_batches (

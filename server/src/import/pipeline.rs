@@ -6,14 +6,21 @@ use uuid::Uuid;
 use crate::domain::{IntegrityWarning, RawRow, TransactionRow, UnresolvedAlias};
 use crate::import::normalize::to_norm_key;
 
-/// alias 조회 또는 생성: norm_key → target_id
-/// 없으면 엔티티를 새로 생성(review_state=pending) + alias 자동 생성
-/// 반환: (target_id, is_new)
+// ── Atomic upsert helpers ────────────────────────────────────────────────────
+//
+// Pattern: INSERT ... ON CONFLICT (<partial-index cols>) WHERE <predicate> DO NOTHING RETURNING id
+//          → if None (conflict), SELECT id WHERE <same predicate>
+//
+// Partial unique indexes (see 001_init.sql) handle NULL-in-unique-constraint gaps for
+// categories (parent_id IS NULL) and products (merchant_id IS NOT NULL / IS NULL).
+
+/// Atomic upsert for categories (root-level only; all pipeline categories have parent_id IS NULL).
 ///
-/// P3: 신규 카테고리는 무조건 kind='expense'로 생성.
-/// income 여부는 사용자가 /aliases UI에서 확정.
-/// 예외: 카테고리명이 정확히 "차감"이면 review_state='confirmed'로 생성
-/// (정산 무결성 핵심 카테고리 — 이름 변경 불가, onboarding 시 owner당 1회 시드 예정 [M2]).
+/// The partial index `categories_owner_name_root_uniq` on (owner_id, name) WHERE parent_id IS NULL
+/// makes ON CONFLICT safe even when parent_id is NULL — no advisory lock needed.
+///
+/// "차감" rule: norm == "차감" gets review_state='confirmed' on first creation.
+/// DO NOTHING ensures an existing 'confirmed' row is never downgraded.
 async fn upsert_category(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -21,7 +28,7 @@ async fn upsert_category(
 ) -> Result<(Uuid, bool)> {
     let norm = to_norm_key(raw_text);
 
-    // 1. alias에서 norm_key 조회
+    // 1. Alias lookup (cheapest path).
     let existing = sqlx::query!(
         r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'category' AND norm_key = $2"#,
         owner_id,
@@ -34,37 +41,40 @@ async fn upsert_category(
         return Ok((row.target_id, false));
     }
 
-    // 2. 같은 norm_key의 카테고리 직접 조회
-    let cat_existing = sqlx::query!(
-        r#"SELECT id FROM categories WHERE owner_id = $1 AND name = $2"#,
+    // "차감" (normalized) always gets review_state='confirmed' on first creation.
+    let is_deduction = norm == "차감";
+    let review_state = if is_deduction { "confirmed" } else { "pending" };
+
+    // 2. INSERT targeting the partial index; fallback SELECT on conflict.
+    let cat_id_opt: Option<Uuid> = sqlx::query_scalar!(
+        r#"INSERT INTO categories (owner_id, name, kind, review_state)
+           VALUES ($1, $2, 'expense', $3)
+           ON CONFLICT (owner_id, name) WHERE parent_id IS NULL DO NOTHING
+           RETURNING id"#,
         owner_id,
-        norm
+        norm,
+        review_state,
     )
     .fetch_optional(&mut *conn)
-    .await?;
+    .await
+    .context("category INSERT failed")?;
 
-    let (cat_id, is_new) = if let Some(row) = cat_existing {
-        (row.id, false)
-    } else {
-        // P3: 신규 카테고리는 항상 kind='expense'.
-        // P7: "차감"이면 review_state='confirmed' (정산 핵심 카테고리 — 이름 변경 불가).
-        let is_deduction_category = raw_text == "차감";
-        let review_state = if is_deduction_category { "confirmed" } else { "pending" };
-
-        let new_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO categories (owner_id, name, kind, review_state)
-               VALUES ($1, $2, 'expense', $3)
-               RETURNING id"#,
-            owner_id,
-            norm,
-            review_state,
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        (new_id, true)
+    let (cat_id, is_new) = match cat_id_opt {
+        Some(id) => (id, true),
+        None => {
+            let id = sqlx::query_scalar!(
+                r#"SELECT id FROM categories WHERE owner_id = $1 AND name = $2 AND parent_id IS NULL"#,
+                owner_id,
+                norm
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .context("category conflict-fallback SELECT failed")?;
+            (id, false)
+        }
     };
 
-    // alias 생성
+    // 3. Register alias.
     sqlx::query!(
         r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
            VALUES ($1, 'category', $2, $3, $4)
@@ -87,6 +97,7 @@ async fn upsert_merchant(
 ) -> Result<(Uuid, bool)> {
     let norm = to_norm_key(raw_text);
 
+    // 1. Alias lookup.
     let existing = sqlx::query!(
         r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'merchant' AND norm_key = $2"#,
         owner_id,
@@ -99,27 +110,32 @@ async fn upsert_merchant(
         return Ok((row.target_id, false));
     }
 
-    let merch_existing = sqlx::query!(
-        r#"SELECT id FROM merchants WHERE owner_id = $1 AND name = $2"#,
+    // 2. Atomic INSERT with fallback SELECT.
+    //    merchants.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly.
+    let merch_id: Option<Uuid> = sqlx::query_scalar!(
+        r#"INSERT INTO merchants (owner_id, name, review_state)
+           VALUES ($1, $2, 'pending')
+           ON CONFLICT (owner_id, name) DO NOTHING
+           RETURNING id"#,
         owner_id,
-        norm
+        norm,
     )
     .fetch_optional(&mut *conn)
     .await?;
 
-    let (merch_id, is_new) = if let Some(row) = merch_existing {
-        (row.id, false)
-    } else {
-        let new_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO merchants (owner_id, name, review_state)
-               VALUES ($1, $2, 'pending')
-               RETURNING id"#,
-            owner_id,
-            norm,
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        (new_id, true)
+    let (merch_id, is_new) = match merch_id {
+        Some(id) => (id, true),
+        None => {
+            let id = sqlx::query_scalar!(
+                r#"SELECT id FROM merchants WHERE owner_id = $1 AND name = $2"#,
+                owner_id,
+                norm
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .context("merchant conflict-fallback SELECT failed")?;
+            (id, false)
+        }
     };
 
     sqlx::query!(
@@ -156,25 +172,30 @@ async fn upsert_actor(
         return Ok((row.target_id, false));
     }
 
-    let actor_existing = sqlx::query!(
-        r#"SELECT id FROM ledger_actors WHERE owner_id = $1 AND name = $2"#,
+    // ledger_actors.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly.
+    let actor_id: Option<Uuid> = sqlx::query_scalar!(
+        r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, $2)
+           ON CONFLICT (owner_id, name) DO NOTHING
+           RETURNING id"#,
         owner_id,
-        norm
+        norm,
     )
     .fetch_optional(&mut *conn)
     .await?;
 
-    let (actor_id, is_new) = if let Some(row) = actor_existing {
-        (row.id, false)
-    } else {
-        let new_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, $2) RETURNING id"#,
-            owner_id,
-            norm,
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        (new_id, true)
+    let (actor_id, is_new) = match actor_id {
+        Some(id) => (id, true),
+        None => {
+            let id = sqlx::query_scalar!(
+                r#"SELECT id FROM ledger_actors WHERE owner_id = $1 AND name = $2"#,
+                owner_id,
+                norm
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .context("actor conflict-fallback SELECT failed")?;
+            (id, false)
+        }
     };
 
     sqlx::query!(
@@ -211,25 +232,30 @@ async fn upsert_payment_method(
         return Ok((row.target_id, false));
     }
 
-    let pm_existing = sqlx::query!(
-        r#"SELECT id FROM payment_methods WHERE owner_id = $1 AND name = $2"#,
+    // payment_methods.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly.
+    let pm_id: Option<Uuid> = sqlx::query_scalar!(
+        r#"INSERT INTO payment_methods (owner_id, name) VALUES ($1, $2)
+           ON CONFLICT (owner_id, name) DO NOTHING
+           RETURNING id"#,
         owner_id,
-        norm
+        norm,
     )
     .fetch_optional(&mut *conn)
     .await?;
 
-    let (pm_id, is_new) = if let Some(row) = pm_existing {
-        (row.id, false)
-    } else {
-        let new_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO payment_methods (owner_id, name) VALUES ($1, $2) RETURNING id"#,
-            owner_id,
-            norm,
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        (new_id, true)
+    let (pm_id, is_new) = match pm_id {
+        Some(id) => (id, true),
+        None => {
+            let id = sqlx::query_scalar!(
+                r#"SELECT id FROM payment_methods WHERE owner_id = $1 AND name = $2"#,
+                owner_id,
+                norm
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .context("payment_method conflict-fallback SELECT failed")?;
+            (id, false)
+        }
     };
 
     sqlx::query!(
@@ -247,7 +273,10 @@ async fn upsert_payment_method(
     Ok((pm_id, is_new))
 }
 
-/// product 매핑: (merchant_id, norm_key(memo)) 키로 조회/생성
+/// Product upsert (non-NULL merchant_id path only — callers always pass Some(merch_id)).
+///
+/// The partial index `products_owner_merchant_name_uniq` on (owner_id, merchant_id, name)
+/// WHERE merchant_id IS NOT NULL enables ON CONFLICT without an advisory lock.
 async fn upsert_product(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -256,7 +285,7 @@ async fn upsert_product(
 ) -> Result<(Uuid, bool)> {
     let norm = to_norm_key(memo);
 
-    // product scope alias: raw_text = memo, norm_key = norm
+    // Product aliases are keyed only on norm_key (not merchant), matching M1 behavior.
     let existing = sqlx::query!(
         r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'product' AND norm_key = $2"#,
         owner_id,
@@ -269,30 +298,33 @@ async fn upsert_product(
         return Ok((row.target_id, false));
     }
 
-    // 같은 (merchant_id, norm_key)의 product 조회
-    let prod_existing = sqlx::query!(
-        r#"SELECT id FROM products WHERE owner_id = $1 AND merchant_id = $2 AND name = $3"#,
+    // INSERT targeting the partial index; fallback SELECT on conflict.
+    let prod_id: Option<Uuid> = sqlx::query_scalar!(
+        r#"INSERT INTO products (owner_id, merchant_id, name, review_state)
+           VALUES ($1, $2, $3, 'pending')
+           ON CONFLICT (owner_id, merchant_id, name) WHERE merchant_id IS NOT NULL DO NOTHING
+           RETURNING id"#,
         owner_id,
         merchant_id,
-        norm
+        norm,
     )
     .fetch_optional(&mut *conn)
     .await?;
 
-    let (prod_id, is_new) = if let Some(row) = prod_existing {
-        (row.id, false)
-    } else {
-        let new_id: Uuid = sqlx::query_scalar!(
-            r#"INSERT INTO products (owner_id, merchant_id, name, review_state)
-               VALUES ($1, $2, $3, 'pending')
-               RETURNING id"#,
-            owner_id,
-            merchant_id,
-            norm,
-        )
-        .fetch_one(&mut *conn)
-        .await?;
-        (new_id, true)
+    let (prod_id, is_new) = match prod_id {
+        Some(id) => (id, true),
+        None => {
+            let id = sqlx::query_scalar!(
+                r#"SELECT id FROM products WHERE owner_id = $1 AND merchant_id = $2 AND name = $3"#,
+                owner_id,
+                merchant_id,
+                norm
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .context("product conflict-fallback SELECT failed")?;
+            (id, false)
+        }
     };
 
     sqlx::query!(
@@ -310,7 +342,7 @@ async fn upsert_product(
     Ok((prod_id, is_new))
 }
 
-/// transactions_raw에 행 삽입
+/// Insert one row into transactions_raw.
 async fn insert_raw(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -353,7 +385,7 @@ async fn insert_raw(
     Ok(raw_id)
 }
 
-/// transactions에 행 삽입
+/// Insert one row into transactions.
 async fn insert_transaction(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -389,8 +421,8 @@ async fn insert_transaction(
     Ok(txn_id)
 }
 
-/// 그룹 합계 무결성 검증 SQL (PLAN §1)
-/// 결과 0행 = 정상. 불일치 group_id는 경고 반환.
+/// Group-sum integrity check (PLAN §1).
+/// Returns 0 rows on success; non-zero rows are surfaced as warnings.
 pub async fn check_group_integrity(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -431,40 +463,24 @@ pub async fn check_group_integrity(
     Ok(warnings)
 }
 
-/// 전체 임포트 파이프라인 실행
-/// raw 저장 → 정규화 → transaction 생성 → 합계 무결성 검증
-/// 모든 쿼리는 단일 트랜잭션 내에서 실행 (conn은 호출자가 관리하는 트랜잭션).
+/// Full import pipeline: raw insert → normalize → transaction rows → integrity check.
+/// All queries run inside the caller-managed transaction (conn).
 pub async fn run_pipeline(
     conn: &mut PgConnection,
     owner_id: Uuid,
     batch_id: Uuid,
     rows: Vec<RawRow>,
 ) -> Result<(i64, Vec<IntegrityWarning>, Vec<UnresolvedAlias>)> {
-    // group_id별 행 수 집계 (multi-line 판단)
-    let mut group_size_map: std::collections::HashMap<Uuid, usize> =
-        std::collections::HashMap::new();
-    for row in &rows {
-        *group_size_map.entry(row.group_id).or_insert(0) += 1;
-    }
-
     let mut transactions_inserted: i64 = 0;
     let mut unresolved: Vec<UnresolvedAlias> = Vec::new();
 
     for row in &rows {
-        // 1. transactions_raw 삽입
+        // 1. Store raw row.
         let raw_id = insert_raw(conn, owner_id, batch_id, row)
             .await
             .context("Failed to insert raw row")?;
 
-        // 2. transactions 생성 여부 판단
-        // PLAN §3-6: "multi-line 그룹: 헤더는 미생성, 자식 N개만 라인으로 저장"
-        // 실측: 헤더도 자체 line_amount를 가지므로, 헤더의 line_amount를 transaction으로 저장함.
-        // total_amount(합계)를 중복 저장하지 않는 방식으로 무결성 유지.
-        //   - single-line 그룹 헤더: total_amount(=line_amount)로 1 transaction 생성
-        //   - multi-line 그룹 헤더: line_amount로 1 transaction 생성 (total_amount는 무시)
-        //   - multi-line 그룹 자식: line_amount로 1 transaction 생성
-
-        // occurred_on 없으면 transaction 생성 불가
+        // 2. Skip rows without a date — can't build a transaction.
         let occurred_on = match row.occurred_on {
             Some(d) => d,
             None => {
@@ -473,7 +489,7 @@ pub async fn run_pipeline(
             }
         };
 
-        // 3. 정규화: 각 텍스트 컬럼 → entity_id
+        // 3. Normalize each text column → entity id.
 
         // merchant
         let merchant_id = if let Some(ref text) = row.merchant_text {
@@ -499,7 +515,6 @@ pub async fn run_pipeline(
         };
 
         // category
-        // P3: 신규 카테고리는 항상 kind='expense'. income 여부는 사용자가 UI에서 확정.
         let category_id = if let Some(ref text) = row.category_text {
             let (id, is_new) = upsert_category(conn, owner_id, text).await?;
             if is_new {
@@ -522,17 +537,10 @@ pub async fn run_pipeline(
             None
         };
 
-        // 4. amount, sign 결정
-        // amount: 항상 양수 (line_amount의 절댓값)
-        // sign: +1=지출, -1=수입(회수)
-        // 카테고리="차감"은 sign=+1 (PLAN §6, 영수증 합계 무결성 유지)
-        //
-        // 모든 경우에 line_amount를 사용:
-        // - multi-line 헤더: line_amount (자신의 아이템 금액)
-        // - multi-line 자식: line_amount
-        // - single-line 헤더: line_amount (= total_amount와 동일)
+        // 4. Compute amount and sign.
+        //    amount is always positive; sign=+1 for expense, -1 for income/refund.
+        //    "차감" category keeps sign=+1 (PLAN §6, receipt-sum integrity).
         let raw_amount = row.line_amount.or(row.total_amount);
-
         let raw_amount = match raw_amount {
             Some(a) => a,
             None => {
@@ -541,25 +549,23 @@ pub async fn run_pipeline(
             }
         };
 
-        // sign 결정: 음수 금액이면 sign=-1 (수입/회수)
-        // 카테고리="차감"은 sign=+1 (PLAN §6)
         let is_deduction = row
             .category_text
             .as_deref()
-            .map(|c| c == "차감")
+            .map(|c| to_norm_key(c) == "차감")
             .unwrap_or(false);
 
         let sign: i16 = if is_deduction {
-            1 // 차감은 항상 +1
+            1
         } else if raw_amount < Decimal::ZERO {
-            -1 // 음수 금액 = 수입/회수
+            -1
         } else {
-            1 // 양수 = 지출
+            1
         };
 
         let amount = raw_amount.abs();
 
-        // 5. product 매핑 (메모 있는 행만)
+        // 5. Product mapping (memo-bearing rows only).
         let product_id = if let (Some(ref memo), Some(merch_id)) = (&row.memo, merchant_id) {
             if !memo.is_empty() {
                 let (id, is_new) = upsert_product(conn, owner_id, merch_id, memo).await?;
@@ -578,7 +584,7 @@ pub async fn run_pipeline(
             None
         };
 
-        // 6. transaction 삽입
+        // 6. Insert normalized transaction.
         let t = TransactionRow {
             raw_id,
             group_id: row.group_id,
@@ -599,7 +605,7 @@ pub async fn run_pipeline(
         transactions_inserted += 1;
     }
 
-    // 7. 합계 무결성 검증 (같은 트랜잭션 내)
+    // 7. Group-sum integrity check (within the same transaction).
     let integrity_warnings = check_group_integrity(conn, owner_id, batch_id).await?;
 
     if !integrity_warnings.is_empty() {

@@ -63,9 +63,12 @@ CREATE TABLE categories (
   name         text NOT NULL,                    -- canonical name after normalization
   kind         text NOT NULL CHECK (kind IN ('income','expense')),
   review_state text NOT NULL DEFAULT 'pending'
-               CHECK (review_state IN ('pending','confirmed')),
-  UNIQUE (owner_id, parent_id, name)
+               CHECK (review_state IN ('pending','confirmed'))
 );
+CREATE UNIQUE INDEX categories_owner_name_root_uniq 
+  ON categories (owner_id, name) WHERE parent_id IS NULL;
+CREATE UNIQUE INDEX categories_owner_parent_name_uniq 
+  ON categories (owner_id, parent_id, name) WHERE parent_id IS NOT NULL;
 
 CREATE TABLE merchants (
   id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -82,9 +85,12 @@ CREATE TABLE products (
   merchant_id  uuid REFERENCES merchants(id),  -- usually NOT NULL, but NULL allowed to express "merchant-agnostic product"
   name         text NOT NULL,                   -- canonical product name after normalization
   review_state text NOT NULL DEFAULT 'pending'
-               CHECK (review_state IN ('pending','confirmed')),
-  UNIQUE (owner_id, merchant_id, name)
+               CHECK (review_state IN ('pending','confirmed'))
 );
+CREATE UNIQUE INDEX products_owner_merchant_name_uniq 
+  ON products (owner_id, merchant_id, name) WHERE merchant_id IS NOT NULL;
+CREATE UNIQUE INDEX products_owner_name_no_merchant_uniq 
+  ON products (owner_id, name) WHERE merchant_id IS NULL;
 
 -- Payment methods: there are no joint cards. Every payment method is owned by 엉아 or 아기.
 -- Owned by 아기: 농협, 신한아기, 롯데, 삼성, 국민, 비씨, 현대, 현금아기.
@@ -181,6 +187,7 @@ Notes:
   - **Single-line group**: header is itself the line → 1 row in `transactions`.
   - **Multi-line group**: the header gets its own row plus N rows for the children, totaling (1 + N) rows. (The header's `total_amount` overlaps with the child sum, but it is preserved for integrity verification and to keep parity with single-line storage.)
 - **`"차감"` (deduction) category**: auto-created by the import pipeline (`kind='expense'`, `review_state='confirmed'`, protected). Stored with `sign=+1` to preserve receipt-sum integrity, but separated out at settlement time. Its contradictory nature — joint payment yet personally borne — is identified by category name.
+- **Atomic upserts**: categories/products use partial unique indexes to enable `INSERT ... ON CONFLICT DO NOTHING` to work correctly with nullable columns. The four partial indexes (`categories_owner_name_root_uniq`, `categories_owner_parent_name_uniq`, `products_owner_merchant_name_uniq`, `products_owner_name_no_merchant_uniq`) are defined above and ensure race-safety under any isolation level.
 
 ### Settlement Flow and View (M2)
 
@@ -417,10 +424,47 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 - Transactions list page (initial filters, group expand).
 
 **M2 — Normalization UI + monthly dashboard + settlement card** (criteria: merging "이 마트" into "이마트" via the review queue updates `merchant_id` on existing transactions and immediately reflects in aggregates. Merging "조닌끼안티" / "조닌 끼안티" product aliases auto-remaps `product_id`. `v_monthly_settlement` returns `deducted_amount = 7,500` for February.)
-- /aliases page (unmatched list, merge / confirm) — 4 tabs including product.
-- On alias change, automatically remap affected transactions (`merchant_id`, `product_id`, etc.).
-- /api/summary/:year/:month + dashboard (same pivot as the Excel "(집계)" sheet + settlement card).
-- /api/settlement/:year/:month.
+
+**Step A (✅ 2026-05-02)**: Atomic upserts + read-only endpoints.
+- Atomic upsert refactor in `server/src/import/pipeline.rs`: all entities (merchants, ledger_actors, payment_methods, categories, products) now use `INSERT ... ON CONFLICT DO NOTHING RETURNING` + fallback `SELECT`. Categories and products rely on the four partial unique indexes defined above to make ON CONFLICT atomic for nullable columns.
+- Five new endpoints: `GET /api/categories`, `GET /api/merchants`, `GET /api/payment-methods` (with actor join), `GET /api/summary/:year/:month` (category × actor pivot, no deduction subtraction; `LEFT JOIN ledger_actors` to surface NULL actor as "(미지정)"), `GET /api/settlement/:year/:month` (v_monthly_settlement read-only).
+- Tests: 49 passed (↑ 2 real concurrency tests with `tokio::sync::Barrier`); settlement test confirmed `deducted_amount = 7500` for Feb 2026.
+
+**Step B (pending)**: Alias CRUD + review queue + auto-remap (backend).
+- New endpoints in `server/src/api/aliases.rs`:
+  - `GET /api/review-queue?scope=category|merchant|payment_method|actor|product` — list entities with `review_state='pending'` (joined with their primary alias rows so the UI sees raw_text + norm_key + current target). Cross-scope when `?scope` omitted. Includes a `merge_candidates` field per row: other entities with the same `norm_key` ± edit-distance ≤ 1, scoped to the same owner.
+  - `POST /api/aliases` — body `{scope, raw_text, target_id}`. Two behaviors in a single endpoint, both atomic in one transaction:
+    1. **Create** when no alias exists for `(owner_id, scope, norm_key(raw_text))` → INSERT alias only.
+    2. **Merge** when an alias exists with a different `target_id` → UPDATE alias.target_id, then `UPDATE transactions SET <scope>_id = $new WHERE owner_id = $o AND <scope>_id = $old`, then optionally DELETE the now-orphaned entity (only if no other alias points to it AND no transactions still reference it). Returns `{remapped_transaction_count, orphan_deleted: bool}`.
+  - `DELETE /api/aliases/:id` — remove an alias row only. Does NOT touch transactions; the user has to merge or confirm to change mappings.
+  - `POST /api/entities/:scope/:id/confirm` — flip `review_state` from `pending` to `confirmed`. "차감" is rejected (cannot be modified).
+- `payment_method` merge has the extra wrinkle of `actor_id` ownership. PLAN domain rules pin every payment method to either 엉아 or 아기. Merging payment methods across actors is rejected with 409; the UI must surface the conflict.
+- Concurrency: the merge path must hold a row-level `SELECT ... FOR UPDATE` on the source entity row before the alias UPDATE so two concurrent merges into different targets cannot both succeed.
+- Tests: merging "이 마트" → "이마트" updates `transactions.merchant_id` for all affected rows and the orphaned merchant row is deleted; merging "조닌끼안티" / "조닌 끼안티" products auto-remaps `product_id` (PLAN §6 M2 acceptance criteria); confirm endpoint refuses "차감"; concurrent two-merge race resolves to a single winner with the second 409-ing.
+- Acceptance: cargo test green; the M2 acceptance criteria for merge cases pass; `v_monthly_settlement` numbers do not drift after a merge (regression check).
+
+**Step C (pending)**: Frontend `/aliases` page — 4 tabs (category / merchant / payment / product).
+- Replace the placeholder at `web/app/(app)/aliases/page.tsx`.
+- Tab structure: Category / Merchant / Payment / Product. Actor is intentionally omitted (only 3 fixed values, no review needed).
+- Per tab:
+  - Server-fetch `/api/review-queue?scope=<tab>` and render a table: raw_text, norm_key, current target name, review_state badge, action buttons.
+  - Action: **Confirm as new** → `POST /api/entities/<scope>/<id>/confirm`. Optimistic UI update.
+  - Action: **Merge into existing** → opens a combobox listing other entities with the same scope (preselects `merge_candidates` first). On submit, `POST /api/aliases` with `target_id` of the chosen entity. Surfaces the response's `remapped_transaction_count` in a toast.
+  - Action: **Delete alias** → `DELETE /api/aliases/:id` with confirmation dialog.
+- Empty state: when a tab has zero pending items, show "All <scope> entries are confirmed.".
+- Error handling: 409 on payment-method actor mismatch surfaces inline ("Cannot merge: source belongs to 엉아, target to 아기"); generic 5xx falls through to a toast.
+- After any successful action, revalidate the same tab's data and any other page known to depend on it (transactions list — Next.js `router.refresh()` is sufficient).
+- Tests: vitest covers the merge dialog interaction (mocked fetch), 409 rendering, and tab switching state isolation.
+- Acceptance: from `/aliases` Merchant tab, merging "이 마트" into "이마트" — the resulting toast shows the correct remapped count, and navigating to `/transactions` shows the merchant name updated; merging two product variants in the Product tab consolidates `product_id` (verify by counting distinct product names in the table).
+
+**Step D (pending)**: Frontend dashboard (summary + settlement card) at `web/app/(app)/page.tsx`.
+- Month picker at top (default = current calendar month). State stored in URL search params so the dashboard is shareable / refresh-stable.
+- **Settlement card** (top): three figures from `GET /api/settlement/:year/:month` rendered as "approved ₩XXX − deduction ₩X = deposit ₩XXX". When `recognized_expense = 0` (no data for the month), the card collapses to "No settlement data for <month>.".
+- **Category × Actor pivot table** (middle): rows = categories, columns = actors (공동, 엉아, 아기, plus "(미지정)" if any), cells = `Decimal` formatted as KRW. Total column on the right, total row on the bottom. 차감 is shown as a normal pivot row — not subtracted (the settlement card already separates it).
+- **Recent transactions** (bottom): last 10 rows from `GET /api/transactions?from=<month-start>&to=<month-end>`, with the same group-expand behavior as the existing `/transactions` page (reuse the table component if practical).
+- Loading states: skeletons while server components fetch.
+- Tests: vitest covers the month-picker → URL sync, the empty-month settlement card, and one snapshot of the populated pivot for Feb 2026 mocked data.
+- Acceptance: with the golden file imported, the Feb 2026 dashboard shows approved 584,000, deduction 7,500, deposit 576,500 (PLAN §0 cross-check); the pivot shows 차감 as a normal row totaling 7,500.
 
 **M3 — Price tracking + merchant statistics + multi-month aggregation** (criteria: 6 occurrences of 고덕방 iced americano are grouped at 3,400 KRW each, displayed as a unit-price time series. The 167 memo-less rows are surfaced separately as monthly per-merchant totals.)
 - /api/price-history (per product).

@@ -65,6 +65,12 @@ finance_mananger/
 - **Tests**: backend `cargo test` 34 passed, frontend `npm test` 58 passed.
 - **Verification**: golden file `2026년 02월.xlsx` inserts 177 rows; `v_monthly_settlement` reports `deducted_amount = 7500` (matches Excel); group-integrity check returns 0 rows.
 
+### M2 Implementation Status (Step A: Atomic upserts + read-only endpoints)
+- **Atomic upserts**: all entities use `INSERT ... ON CONFLICT DO NOTHING RETURNING` + fallback `SELECT`. Categories and products rely on partial unique indexes (`categories_owner_name_root_uniq`, `categories_owner_parent_name_uniq`, `products_owner_merchant_name_uniq`, `products_owner_name_no_merchant_uniq`) to make ON CONFLICT atomic for nullable columns.
+- **Backend endpoints**: `GET /api/categories` (list with id/name/kind/review_state/parent_id), `GET /api/merchants` (list with id/name/review_state), `GET /api/payment-methods` (with actor join), `GET /api/summary/:year/:month` (category × actor pivot; `LEFT JOIN ledger_actors` surfaces unmatched rows as "(미지정)"), `GET /api/settlement/:year/:month` (v_monthly_settlement read-only).
+- **Tests**: backend `cargo test` 49 passed (2 real concurrency tests using `tokio::sync::Barrier`); settlement test confirmed `deducted_amount = 7500` for Feb 2026.
+- **Status**: Step A ✅ done (2026-05-02); Steps B/C/D pending.
+
 ---
 
 ## Deployment — Docker Compose
@@ -148,5 +154,5 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 ## Milestone Summary
 
 - **M1**: Bootstrap + import — ✅ done (2026-04-25). 177 rows inserted from `2026년 02월.xlsx`, group-sum integrity 0 rows, tests passing.
-- **M2**: Normalization UI + monthly dashboard + settlement card (`v_monthly_settlement`).
+- **M2**: Normalization UI + monthly dashboard + settlement card. Step A ✅ (atomic upserts + read-only endpoints, 2026-05-02). Steps B/C/D pending.
 - **M3**: Price tracking + merchant statistics + multi-month aggregation.
