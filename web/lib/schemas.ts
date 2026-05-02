@@ -101,12 +101,52 @@ export type ImportResponse = z.infer<typeof ImportResponseSchema>;
 
 // ─── 정산 스키마 (M2 대비) ──────────────────────────────────────────────────
 export const SettlementSchema = z.object({
+  year: z.number().int(),
+  month: z.number().int(),
   recognized_expense: DecimalSchema,
   deducted_amount: DecimalSchema,
   settlement_input: DecimalSchema,
 });
 
 export type Settlement = z.infer<typeof SettlementSchema>;
+
+// ─── Summary 스키마 (M2 Step D — category × actor pivot) ───────────────────
+// server/src/api/summary.rs: SummaryResponse / CategorySummary / ByActorEntry / ActorRef
+
+export const ActorRefSchema = z.object({
+  actor_id: z.string().uuid().nullable(),
+  actor_name: z.string(),
+});
+
+export type ActorRef = z.infer<typeof ActorRefSchema>;
+
+export const ByActorEntrySchema = z.object({
+  actor_id: z.string().uuid().nullable(),
+  actor_name: z.string(),
+  amount: DecimalSchema,
+  sign: z.number().int(),
+});
+
+export type ByActorEntry = z.infer<typeof ByActorEntrySchema>;
+
+export const CategorySummarySchema = z.object({
+  category_id: z.string().uuid(),
+  category_name: z.string(),
+  kind: z.string(),
+  by_actor: z.array(ByActorEntrySchema),
+  total: DecimalSchema,
+});
+
+export type CategorySummary = z.infer<typeof CategorySummarySchema>;
+
+export const SummaryResponseSchema = z.object({
+  year: z.number().int(),
+  month: z.number().int(),
+  categories: z.array(CategorySummarySchema),
+  actors: z.array(ActorRefSchema),
+});
+
+export type SummaryResponse = z.infer<typeof SummaryResponseSchema>;
 
 // ─── Review Queue / Alias schemas (M2 Step C) ──────────────────────────────
 // server/src/api/aliases.rs: AliasInfo, ReviewQueueItem, MergeCandidate,

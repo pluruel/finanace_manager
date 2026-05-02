@@ -1,17 +1,84 @@
 import { Suspense } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { apiFetch, ApiError } from "@/lib/api";
-import { TransactionsResponseSchema, TransactionsResponse } from "@/lib/schemas";
+import {
+  TransactionsResponseSchema,
+  TransactionsResponse,
+  SettlementSchema,
+  Settlement,
+  SummaryResponseSchema,
+  SummaryResponse,
+} from "@/lib/schemas";
 import { formatAmount, formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { LayoutDashboard, TrendingUp, AlertCircle } from "lucide-react";
+import { LayoutDashboard, AlertCircle } from "lucide-react";
+import { MonthPicker } from "@/components/month-picker";
+import { SettlementCard } from "@/components/settlement-card";
+import { SummaryPivot } from "@/components/summary-pivot";
 
-async function RecentTransactions() {
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function parseYM(input: string | undefined): { year: number; month: number } {
+  if (input && /^\d{4}-\d{2}$/.test(input)) {
+    const [y, m] = input.split("-").map(Number);
+    if (m >= 1 && m <= 12) return { year: y, month: m };
+  }
+  const now = new Date();
+  return { year: now.getFullYear(), month: now.getMonth() + 1 };
+}
+
+function monthRange(year: number, month: number): { from: string; to: string } {
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return {
+    from: `${year}-${pad(month)}-01`,
+    to: `${year}-${pad(month)}-${pad(last)}`,
+  };
+}
+
+// ── Data fetchers (server-side) ──────────────────────────────────────────────
+
+async function fetchSettlement(year: number, month: number): Promise<Settlement | null> {
+  try {
+    return await apiFetch<Settlement>(`/api/settlement/${year}/${month}`, {
+      schema: SettlementSchema,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function fetchSummary(year: number, month: number): Promise<SummaryResponse | null> {
+  try {
+    return await apiFetch<SummaryResponse>(`/api/summary/${year}/${month}`, {
+      schema: SummaryResponseSchema,
+    });
+  } catch {
+    return null;
+  }
+}
+
+// ── Sections ─────────────────────────────────────────────────────────────────
+
+async function SettlementSection({ year, month }: { year: number; month: number }) {
+  const data = await fetchSettlement(year, month);
+  return <SettlementCard year={year} month={month} data={data} />;
+}
+
+async function SummarySection({ year, month }: { year: number; month: number }) {
+  const data = await fetchSummary(year, month);
+  return <SummaryPivot data={data} />;
+}
+
+async function RecentTransactions({ year, month }: { year: number; month: number }) {
+  const { from, to } = monthRange(year, month);
+  const qs = new URLSearchParams({ from, to }).toString();
+
   let data: TransactionsResponse | null = null;
   let error: string | null = null;
 
   try {
-    data = await apiFetch<TransactionsResponse>("/api/transactions", {
+    data = await apiFetch<TransactionsResponse>(`/api/transactions?${qs}`, {
       schema: TransactionsResponseSchema,
     });
   } catch (err) {
@@ -34,20 +101,18 @@ async function RecentTransactions() {
   if (!data || data.items.length === 0) {
     return (
       <p className="text-muted-foreground text-sm p-4">
-        아직 거래 내역이 없습니다. 엑셀 파일을 임포트해주세요.
+        이 달의 거래 내역이 없습니다.
       </p>
     );
   }
 
-  // 최근 5개 아이템만 표시
-  const recentItems = data.items.slice(0, 5);
+  const recent = data.items.slice(0, 10);
 
   return (
     <div className="divide-y">
-      {recentItems.map((item) => {
+      {recent.map((item) => {
         const isDeduction = item.category_name === "차감";
         const isMultiLine = item.children.length > 0;
-        const signed = formatAmount(item.amount, item.sign);
 
         return (
           <div
@@ -74,16 +139,8 @@ async function RecentTransactions() {
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <span>{formatDate(item.occurred_on)}</span>
-                {item.category_name && (
-                  <span className="text-muted-foreground">
-                    · {item.category_name}
-                  </span>
-                )}
-                {item.actor_name && (
-                  <span className="text-muted-foreground">
-                    · {item.actor_name}
-                  </span>
-                )}
+                {item.category_name && <span>· {item.category_name}</span>}
+                {item.actor_name && <span>· {item.actor_name}</span>}
               </div>
             </div>
             <span
@@ -91,7 +148,7 @@ async function RecentTransactions() {
                 item.sign === -1 ? "text-blue-600" : "text-foreground"
               }`}
             >
-              {signed}
+              {formatAmount(item.amount, item.sign)}
             </span>
           </div>
         );
@@ -100,54 +157,74 @@ async function RecentTransactions() {
   );
 }
 
-export default function DashboardPage() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
+// ── Page ─────────────────────────────────────────────────────────────────────
+
+interface PageProps {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}
+
+export default async function DashboardPage({ searchParams }: PageProps) {
+  const params = await searchParams;
+  const ymRaw = typeof params.ym === "string" ? params.ym : undefined;
+  const { year, month } = parseYM(ymRaw);
+
+  // Per-section keys force <Suspense> to re-fire when the month changes.
+  const sectionKey = `${year}-${month}`;
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <div className="flex items-center gap-3">
-        <LayoutDashboard className="h-6 w-6" />
-        <h1 className="text-2xl font-bold">대시보드</h1>
+    <div className="max-w-5xl mx-auto space-y-6">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <LayoutDashboard className="h-6 w-6" />
+          <h1 className="text-2xl font-bold">대시보드</h1>
+        </div>
+        <MonthPicker year={year} month={month} />
       </div>
 
-      {/* 정산 카드 — M2에서 활성화 */}
-      <Card className="border-dashed opacity-60">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <TrendingUp className="h-4 w-4" />
-            {year}년 {month}월 정산 카드
-          </CardTitle>
-          <CardDescription>
-            M2 마일스톤에서 활성화됩니다. (경비인정 − 차감 = 입금액)
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <p className="text-muted-foreground text-sm">
-            정산 데이터는 /api/settlement/:year/:month 엔드포인트가 준비되면 표시됩니다.
-          </p>
-        </CardContent>
-      </Card>
+      <Suspense
+        key={`settlement-${sectionKey}`}
+        fallback={<CardSkeleton title={`${year}년 ${month}월 정산`} />}
+      >
+        <SettlementSection year={year} month={month} />
+      </Suspense>
 
-      {/* 최근 거래 */}
+      <Suspense
+        key={`summary-${sectionKey}`}
+        fallback={<CardSkeleton title="카테고리 × 액터 집계" />}
+      >
+        <SummarySection year={year} month={month} />
+      </Suspense>
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">최근 거래</CardTitle>
-          <CardDescription>가장 최근에 기록된 거래 내역입니다.</CardDescription>
+          <CardDescription>이 달에 기록된 최근 10건입니다.</CardDescription>
         </CardHeader>
         <CardContent className="p-0">
           <Suspense
-            fallback={
-              <p className="text-sm text-muted-foreground p-4">
-                불러오는 중...
-              </p>
-            }
+            key={`recent-${sectionKey}`}
+            fallback={<p className="text-sm text-muted-foreground p-4">불러오는 중...</p>}
           >
-            <RecentTransactions />
+            <RecentTransactions year={year} month={month} />
           </Suspense>
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function CardSkeleton({ title }: { title: string }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="animate-pulse space-y-2">
+          <div className="h-4 bg-muted rounded w-3/4" />
+          <div className="h-4 bg-muted rounded w-1/2" />
+        </div>
+      </CardContent>
+    </Card>
   );
 }

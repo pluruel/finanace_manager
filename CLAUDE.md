@@ -59,7 +59,7 @@ finance_mananger/
 - Detailed routes: see [PLAN.md §4](./PLAN.md).
 
 ### M2 Implementation Status
-M2 is in progress. Steps A/B/C are done; Step D (dashboard) is pending. For full per-step details — endpoints, files touched, test counts, known limitations — see [PLAN.md §6](./PLAN.md). Do not duplicate that content here.
+M2 Steps A/B/C/D are all complete (2026-05-02). For full per-step details — endpoints, files touched, test counts, known limitations — see [PLAN.md §6](./PLAN.md). Do not duplicate that content here.
 
 ---
 
@@ -144,7 +144,7 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 ## Milestone Summary
 
 - **M1**: Bootstrap + import — ✅ done (2026-04-25). 177 rows inserted from `2026년 02월.xlsx`, group-sum integrity 0 rows, tests passing.
-- **M2**: Normalization UI + monthly dashboard + settlement card. Steps A/B ✅ (2026-05-02). Steps C/D pending.
+- **M2**: Normalization UI + monthly dashboard + settlement card — ✅ done (2026-05-02). Steps A/B/C/D all green; backend 62 / frontend 79 tests passing.
 - **M3**: Price tracking + merchant statistics + multi-month aggregation.
 
 ---
@@ -152,3 +152,4 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 ## Cumulative Context (Documentation Agent)
 
 - 2026-05-02: M2 Step B complete — alias CRUD, review queue, auto-remap backend done; merge uses SELECT FOR UPDATE + alias re-read under lock for race safety (memoed in project MEMORY.md for future reference)
+- 2026-05-02: M2 Step D complete — dashboard at `(app)/page.tsx` with month picker (URL `?ym=YYYY-MM`), settlement card, category × actor pivot, recent transactions. New components: `month-picker.tsx`, `settlement-card.tsx`, `summary-pivot.tsx`. Frontend tests 79/79 (10 new in `dashboard.test.tsx`); backend 62/62.

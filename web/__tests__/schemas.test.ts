@@ -286,6 +286,8 @@ describe("IntegrityWarningSchema", () => {
 describe("SettlementSchema", () => {
   it("parses settlement data", () => {
     const result = SettlementSchema.safeParse({
+      year: 2026,
+      month: 2,
       recognized_expense: "584000.00",
       deducted_amount: "7500.00",
       settlement_input: "576500.00",
@@ -295,6 +297,8 @@ describe("SettlementSchema", () => {
 
   it("parses settlement with number inputs", () => {
     const result = SettlementSchema.safeParse({
+      year: 2026,
+      month: 2,
       recognized_expense: 584000,
       deducted_amount: 7500,
       settlement_input: 576500,
