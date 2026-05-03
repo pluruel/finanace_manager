@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            p.id           AS \"id!: Uuid\",\n            p.name         AS \"name!: String\",\n            p.merchant_id  AS \"merchant_id?: Uuid\",\n            m.name         AS \"merchant_name?: String\",\n            p.review_state AS \"review_state!: String\",\n            (SELECT COUNT(*) FROM transactions t\n             WHERE t.owner_id = p.owner_id AND t.product_id = p.id) AS \"transaction_count!: i64\"\n        FROM products p\n        LEFT JOIN merchants m ON m.id = p.merchant_id AND m.owner_id = p.owner_id\n        WHERE p.owner_id = $1\n          AND ($2::uuid IS NULL OR p.merchant_id = $2)\n          AND ($3::text IS NULL\n               OR position($3 in regexp_replace(lower(p.name), '_', ' ', 'g')) > 0)\n        ORDER BY p.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "merchant_id?: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "merchant_name?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "review_state!: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "transaction_count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "e8b7f433beac3f296a13e7038dfd36b55c59bd7a7ea2a23e6e9345763e284ba2"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE transactions SET category_id = $1\n               WHERE owner_id = $2 AND category_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "30399b482ae5be2fd714055c0d98e9b1f8a2bf846574c626248118cfc7d552b8"
+}

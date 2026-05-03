@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO categories (owner_id, name, kind, review_state)\n           VALUES ($1, $2, 'expense', $3)\n           ON CONFLICT (owner_id, name) WHERE parent_id IS NULL DO NOTHING\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f4bf1f05f207698a73190c4c28bcda546036915fe1c6423d93bac1062a9eab54"
+}

@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            recognized_expense AS \"recognized_expense!: Decimal\",\n            deducted_amount    AS \"deducted_amount!: Decimal\",\n            settlement_input   AS \"settlement_input!: Decimal\"\n        FROM v_monthly_settlement\n        WHERE owner_id = $1\n          AND month = make_date($2, $3, 1)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "recognized_expense!: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 1,
+        "name": "deducted_amount!: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 2,
+        "name": "settlement_input!: Decimal",
+        "type_info": "Numeric"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "109fcfc39477a07acf96c55b35531ec54b15db50d597f78cbf83f9d747db7c4f"
+}

@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            t.id           AS \"id!: Uuid\",\n            t.occurred_on  AS \"occurred_on!: NaiveDate\",\n            t.unit_price   AS \"unit_price!: Decimal\",\n            t.quantity     AS \"quantity?: Decimal\",\n            t.amount       AS \"amount!: Decimal\",\n            t.sign         AS \"sign!: i16\",\n            t.merchant_id  AS \"merchant_id?: Uuid\",\n            m.name         AS \"merchant_name?: String\",\n            t.memo\n        FROM transactions t\n        LEFT JOIN merchants m ON m.id = t.merchant_id AND m.owner_id = t.owner_id\n        WHERE t.owner_id = $1\n          AND t.product_id = $2\n          AND t.unit_price IS NOT NULL\n          AND ($3::date IS NULL OR t.occurred_on >= $3)\n          AND ($4::date IS NULL OR t.occurred_on <= $4)\n        ORDER BY t.occurred_on, t.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "occurred_on!: NaiveDate",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 2,
+        "name": "unit_price!: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 3,
+        "name": "quantity?: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 4,
+        "name": "amount!: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 5,
+        "name": "sign!: i16",
+        "type_info": "Int2"
+      },
+      {
+        "ordinal": 6,
+        "name": "merchant_id?: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 7,
+        "name": "merchant_name?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "memo",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "ff1dda8a13d33e0813006b13c72650c6be7a04b740abbef76096ec8c628a6227"
+}

@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            pm.id           AS \"id!: Uuid\",\n            pm.name         AS \"name!: String\",\n            pm.actor_id     AS \"actor_id?: Uuid\",\n            la.name         AS \"actor_name?: String\",\n            pm.review_state AS \"review_state!: String\"\n        FROM payment_methods pm\n        LEFT JOIN ledger_actors la ON la.id = pm.actor_id AND la.owner_id = pm.owner_id\n        WHERE pm.owner_id = $1\n        ORDER BY pm.name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name!: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "actor_id?: Uuid",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "actor_name?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "review_state!: String",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1d58084b35771fe3422ae64d0ef36059f3370f2c3d0077a03b3844eba8a5b60c"
+}

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO products (owner_id, merchant_id, name, review_state)\n           VALUES ($1, $2, $3, 'pending')\n           ON CONFLICT (owner_id, merchant_id, name) WHERE merchant_id IS NOT NULL DO NOTHING\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "763d5d2c1f0e1fc8d653d521285e4c58ec5e8e38f1d301099ce735a5e2a7f55b"
+}
