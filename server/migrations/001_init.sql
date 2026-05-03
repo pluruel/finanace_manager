@@ -44,10 +44,12 @@ CREATE TABLE products (
 -- 아기 소유: 농협, 신한아기, 롯데, 삼성, 국민, 비씨, 현대, 현금아기
 -- 엉아 소유: 현금, 신한, 하나, 씨티클, 현금엉아
 CREATE TABLE payment_methods (
-  id        uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_id  uuid NOT NULL,
-  name      text NOT NULL,
-  actor_id  uuid REFERENCES ledger_actors(id),  -- 결제수단 소유자 (NULL=미매핑)
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id     uuid NOT NULL,
+  name         text NOT NULL,
+  actor_id     uuid REFERENCES ledger_actors(id),  -- 결제수단 소유자 (NULL=미매핑)
+  review_state text NOT NULL DEFAULT 'pending'
+               CHECK (review_state IN ('pending','confirmed')),
   UNIQUE (owner_id, name)
 );
 

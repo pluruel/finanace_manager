@@ -105,6 +105,7 @@ pub struct PaymentMethodItem {
     pub name: String,
     pub actor_id: Option<Uuid>,
     pub actor_name: Option<String>,
+    pub review_state: String,
 }
 
 pub async fn handle_get_payment_methods(
@@ -116,10 +117,11 @@ pub async fn handle_get_payment_methods(
     let rows = sqlx::query!(
         r#"
         SELECT
-            pm.id          AS "id!: Uuid",
-            pm.name        AS "name!: String",
-            pm.actor_id    AS "actor_id?: Uuid",
-            la.name        AS "actor_name?: String"
+            pm.id           AS "id!: Uuid",
+            pm.name         AS "name!: String",
+            pm.actor_id     AS "actor_id?: Uuid",
+            la.name         AS "actor_name?: String",
+            pm.review_state AS "review_state!: String"
         FROM payment_methods pm
         LEFT JOIN ledger_actors la ON la.id = pm.actor_id AND la.owner_id = pm.owner_id
         WHERE pm.owner_id = $1
@@ -137,6 +139,7 @@ pub async fn handle_get_payment_methods(
             name: r.name,
             actor_id: r.actor_id,
             actor_name: r.actor_name,
+            review_state: r.review_state,
         })
         .collect();
 

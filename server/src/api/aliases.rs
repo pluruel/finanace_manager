@@ -272,19 +272,20 @@ async fn fetch_all_entities(
         .map(|r| (r.id, r.name, r.review_state))
         .collect(),
 
-        "payment_method" => {
-            // payment_methods has no review_state column — treat all as 'pending' for query
-            // symmetry; the confirm endpoint handles this scope by setting a synthetic state.
-            // Actually: schema does NOT have review_state on payment_methods; the review queue
-            // only makes sense for scopes that have that column.
-            // Return empty — payment_method does not participate in the review queue via
-            // this mechanism (they are mapped by actor assignment, Step C).
-            // Per spec: actor scope has only 3 fixed values → usually empty. Same logic.
-            vec![]
-        }
+        "payment_method" => sqlx::query!(
+            r#"SELECT id AS "id!: Uuid", name AS "name!", review_state AS "review_state!"
+               FROM payment_methods WHERE owner_id = $1 ORDER BY name"#,
+            owner_id
+        )
+        .fetch_all(&mut *conn)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.name, r.review_state))
+        .collect(),
 
         "actor" => {
-            // ledger_actors has no review_state either. Return empty for symmetry.
+            // ledger_actors has no review_state. The 3 fixed actors (공동/엉아/아기)
+            // do not need review.
             vec![]
         }
 
@@ -521,8 +522,8 @@ pub async fn handle_confirm_entity(
         )));
     }
 
-    // Only category, merchant, product have review_state.
-    if scope == "payment_method" || scope == "actor" {
+    // actor has no review_state; the 3 fixed actors do not need review.
+    if scope == "actor" {
         return Err(AppError::BadRequest(format!(
             "Scope '{}' does not support confirm (no review_state column)",
             scope
@@ -915,6 +916,20 @@ async fn confirm_entity(
             .await?;
             row.map(|r| r.rs)
                 .ok_or_else(|| AppError::NotFound(format!("Product {} not found", entity_id)))
+        }
+
+        "payment_method" => {
+            let row = sqlx::query!(
+                r#"UPDATE payment_methods SET review_state = 'confirmed'
+                   WHERE id = $1 AND owner_id = $2
+                   RETURNING review_state AS "rs!""#,
+                entity_id,
+                owner_id,
+            )
+            .fetch_optional(&mut *conn)
+            .await?;
+            row.map(|r| r.rs)
+                .ok_or_else(|| AppError::NotFound(format!("Payment method {} not found", entity_id)))
         }
 
         _ => Err(AppError::BadRequest(format!(

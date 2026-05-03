@@ -37,7 +37,6 @@ Downstream rules (do not violate):
 finance_mananger/
   CLAUDE.md
   MSA_INTEGRATION.md
-  PLAN.md                    # initial implementation plan (single source of truth)
   docker-compose.yml         # postgres:17 + server + web
   .env.example
   server/                    # Rust (axum) backend
@@ -49,20 +48,21 @@ finance_mananger/
 - DB: PostgreSQL 17, `sqlx` with compile-time query checking.
 - xlsx reading: `calamine`.
 - JWT: `jsonwebtoken` (≥9, EdDSA) + 5-minute in-memory JWKS cache + a single forced refresh on verification failure.
-- Detailed directory layout / endpoints / schema: see [PLAN.md §1·§2](./PLAN.md).
 
 ### Frontend (`web/`, Next.js 15 App Router)
 - UI: shadcn/ui + tailwindcss.
 - Tables: `@tanstack/react-table` (multi-line group expand supported).
 - Charts: `recharts`.
 - Auth: middleware.ts calls `/auth/refresh` on access expiry; redirects to `/login` on failure.
-- Detailed routes: see [PLAN.md §4](./PLAN.md).
 
 ### M2 Implementation Status
-M2 Steps A/B/C/D are all complete (2026-05-02). For full per-step details — endpoints, files touched, test counts, known limitations — see [PLAN.md §6](./PLAN.md). Do not duplicate that content here.
+M2 Steps A/B/C/D all complete (2026-05-02). Alias CRUD + review queue + auto-remap backend, frontend `/aliases` page (4 tabs), dashboard with month picker / settlement card / category × actor pivot.
 
 ### M3 Implementation Status
-M3 (price tracking + merchant stats) complete (2026-05-03). Backend: 3 new endpoints (`/api/products`, `/api/price-history`, `/api/merchant-stats`) in `server/src/api/{products,price,merchant_stats}.rs`. Frontend: `/price-history` page with Products / Merchants toggle (`web/app/(app)/price-history/page.tsx` + 3 new components). Backend 71 tests, frontend 86 tests. Multi-month comparison deferred until a second month of data is imported. Full details in [PLAN.md §6 M3](./PLAN.md).
+M3 (price tracking + merchant stats) complete (2026-05-03). Backend: 3 new endpoints (`/api/products`, `/api/price-history`, `/api/merchant-stats`) in `server/src/api/{products,price,merchant_stats}.rs`. Frontend: `/price-history` page with Products / Merchants toggle (`web/app/(app)/price-history/page.tsx` + 3 new components). Backend 71 tests, frontend 86 tests. Multi-month comparison deferred until a second month of data is imported.
+
+### M4 Implementation Status (MVP close-out)
+M4 complete (2026-05-03). Three sub-steps: **M4-A** (`payment_methods.review_state` migration; `/api/review-queue?scope=payment_method` and confirm now functional — resolves the prior Payment-tab dead-end); **M4-B** (`GET /api/export/:year/:month` xlsx endpoint via `rust_xlsxwriter` with Transactions / Settlement / Summary sheets, plus dashboard "Excel 다운로드" link routed through `web/app/api/export-proxy/[year]/[month]/route.ts`); **M4-C** (doc cleanup). Backend 76 tests (+5: 2 in `test_m2_step_b.rs` for payment-method confirm/queue, 3 in new `test_m4_export.rs`); frontend 86 tests. Multi-month overlay and household-rules page remain deferred.
 
 ---
 
@@ -106,7 +106,7 @@ Deployment / run flow:
 
 ---
 
-## Core Domain Rules (extracted from PLAN)
+## Core Domain Rules
 
 One Excel row is **not** equivalent to one transaction. A single receipt may decompose into a header + N child rows, forming a multi-line group.
 
@@ -140,8 +140,6 @@ One Excel row is **not** equivalent to one transaction. A single receipt may dec
 - Single-line groups produce 1 row in `transactions`. Multi-line groups produce 1 header + N child rows = (1 + N) rows.
 - The `"차감"` (deduction) category is auto-created by the import pipeline (`kind='expense'`, `review_state='confirmed'`, protected). It is stored with `sign=+1`, but the `v_monthly_settlement` view separates it during settlement calculation.
 
-For the full schema, endpoints, normalization pipeline, and milestones, see [PLAN.md](./PLAN.md). **PLAN.md is the single source of truth** — when in conflict, follow PLAN.
-
 ---
 
 ## Milestone Summary
@@ -149,6 +147,7 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 - **M1**: Bootstrap + import — ✅ done (2026-04-25). 177 rows inserted from `2026년 02월.xlsx`, group-sum integrity 0 rows, tests passing.
 - **M2**: Normalization UI + monthly dashboard + settlement card — ✅ done (2026-05-02). Steps A/B/C/D all green; backend 62 / frontend 79 tests passing.
 - **M3**: Price tracking + merchant statistics + multi-month aggregation — ✅ done (2026-05-03). `/api/products`, `/api/price-history`, `/api/merchant-stats`; `/price-history` page Products / Merchants toggle. Backend 71 / frontend 86 tests passing. Acceptance: 6 고덕방 아이스아메리카노 rows show ₩3,400 each.
+- **M4**: MVP close-out — ✅ done (2026-05-03). Payment-method review queue (M4-A), xlsx export (M4-B), doc cleanup (M4-C). Backend 76 / frontend 86 tests passing. **MVP is now complete.**
 
 ---
 
@@ -156,4 +155,5 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 
 - 2026-05-02: M2 Step B complete — alias CRUD, review queue, auto-remap backend done; merge uses SELECT FOR UPDATE + alias re-read under lock for race safety (memoed in project MEMORY.md for future reference)
 - 2026-05-02: M2 Step D complete — dashboard at `(app)/page.tsx` with month picker (URL `?ym=YYYY-MM`), settlement card, category × actor pivot, recent transactions. New components: `month-picker.tsx`, `settlement-card.tsx`, `summary-pivot.tsx`. Frontend tests 79/79 (10 new in `dashboard.test.tsx`); backend 62/62.
-- 2026-05-03: M3 complete — 3 new backend modules (`server/src/api/{products,price,merchant_stats}.rs`) wired into the router (M1 `stubs.rs` deleted), plus `/price-history` page with Products / Merchants toggle (`web/app/(app)/price-history/page.tsx`, `web/components/{price-history-controls,price-history-chart,merchant-stats-chart}.tsx`). Recharts mocked in `web/__tests__/price-history.test.tsx`. Backend 71/71 (9 new in `tests/test_m3.rs`), frontend 86/86 (7 new). Acceptance: 6 고덕방 아이스아메리카노 rows render at ₩3,400 each. PLAN's "≈167 memo-less rows" estimate corrected to actual ~64 (memo→product mapping is more aggressive than the Excel-row estimate suggested).
+- 2026-05-03: M3 complete — 3 new backend modules (`server/src/api/{products,price,merchant_stats}.rs`) wired into the router (M1 `stubs.rs` deleted), plus `/price-history` page with Products / Merchants toggle (`web/app/(app)/price-history/page.tsx`, `web/components/{price-history-controls,price-history-chart,merchant-stats-chart}.tsx`). Recharts mocked in `web/__tests__/price-history.test.tsx`. Backend 71/71 (9 new in `tests/test_m3.rs`), frontend 86/86 (7 new). Acceptance: 6 고덕방 아이스아메리카노 rows render at ₩3,400 each. Memo-less row count: actual 64 in normalized `transactions` (memo→product mapping is aggressive).
+- 2026-05-03: M4 (MVP close-out) complete — (A) `001_init.sql` rewritten to add `review_state` to `payment_methods` (per "rewrite, don't accumulate" migration policy); `aliases.rs` review_queue + confirm now handle `payment_method` scope, resolving the prior dead-Payment-tab limitation. `categories.rs::PaymentMethodItem` exposes `review_state`. (B) New `server/src/api/export.rs` + `rust_xlsxwriter = "0.78"` produce a 3-sheet xlsx (Transactions / Settlement / Summary) at `GET /api/export/:year/:month`; frontend proxy `web/app/api/export-proxy/[year]/[month]/route.ts` + dashboard "Excel 다운로드" link in `(app)/page.tsx`. (C) Doc cleanup. Backend 76/76 (+5: 2 in `test_m2_step_b.rs`, 3 in new `test_m4_export.rs`); frontend 86/86 (no new tests — proxy route is a thin pass-through). MVP complete.

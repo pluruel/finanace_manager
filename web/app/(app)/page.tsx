@@ -11,7 +11,7 @@ import {
 } from "@/lib/schemas";
 import { formatAmount, formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
-import { LayoutDashboard, AlertCircle } from "lucide-react";
+import { LayoutDashboard, AlertCircle, Download } from "lucide-react";
 import { MonthPicker } from "@/components/month-picker";
 import { SettlementCard } from "@/components/settlement-card";
 import { SummaryPivot } from "@/components/summary-pivot";
@@ -178,7 +178,18 @@ export default async function DashboardPage({ searchParams }: PageProps) {
           <LayoutDashboard className="h-6 w-6" />
           <h1 className="text-2xl font-bold">대시보드</h1>
         </div>
-        <MonthPicker year={year} month={month} />
+        <div className="flex items-center gap-2">
+          <a
+            href={`/api/export-proxy/${year}/${month}`}
+            download
+            className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md border border-input bg-background text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors"
+            data-testid="export-download-link"
+          >
+            <Download className="h-4 w-4" />
+            Excel 다운로드
+          </a>
+          <MonthPicker year={year} month={month} />
+        </div>
       </div>
 
       <Suspense

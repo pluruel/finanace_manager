@@ -41,6 +41,9 @@ reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-feature
 # Excel parsing
 calamine = { version = "0.24", features = ["dates"] }
 
+# Excel writing (M4-B export)
+rust_xlsxwriter = { version = "0.78", features = ["chrono"] }
+
 # Data types
 rust_decimal = { version = "1", features = ["serde-with-str"] }
 uuid = { version = "1", features = ["v4", "serde"] }

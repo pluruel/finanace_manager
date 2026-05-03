@@ -1043,3 +1043,92 @@ async fn confirm_merchant_flips_review_state(pool: PgPool) {
     .unwrap();
     assert_eq!(state, "confirmed");
 }
+
+// ── Test 10: confirm_payment_method_flips_review_state (M4-A) ────────────────
+
+/// After importing the golden file, payment_methods are auto-created with
+/// review_state='pending'. Confirming via POST /api/entities/payment_method/:id/confirm
+/// must flip the row to 'confirmed', and /api/review-queue?scope=payment_method
+/// must drop the row from pending.
+#[sqlx::test(migrations = "./migrations")]
+async fn confirm_payment_method_flips_review_state(pool: PgPool) {
+    let pool = Arc::new(pool);
+    let owner_id = Uuid::new_v4();
+    do_import(&pool, owner_id).await;
+
+    let pm_id: Uuid = sqlx::query_scalar!(
+        r#"SELECT id FROM payment_methods WHERE owner_id = $1 AND review_state = 'pending' LIMIT 1"#,
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    // Confirm.
+    let app = build_test_router(pool.clone(), owner_id);
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/entities/payment_method/{}/confirm", pm_id))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["review_state"].as_str(), Some("confirmed"));
+
+    // DB confirmation.
+    let state: String = sqlx::query_scalar!(
+        r#"SELECT review_state FROM payment_methods WHERE id = $1"#,
+        pm_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "confirmed");
+
+    // Review queue must no longer include this id.
+    let req2 = Request::builder()
+        .uri("/api/review-queue?scope=payment_method")
+        .body(Body::empty())
+        .unwrap();
+    let resp2 = app.oneshot(req2).await.unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&body2).unwrap();
+    assert!(
+        arr.iter().all(|v| v["id"].as_str() != Some(pm_id.to_string().as_str())),
+        "confirmed payment method must no longer appear in the pending review queue"
+    );
+}
+
+// ── Test 11: review_queue_payment_method_returns_pending (M4-A) ──────────────
+
+/// /api/review-queue?scope=payment_method must return the freshly imported
+/// (pending) payment methods after the golden import.
+#[sqlx::test(migrations = "./migrations")]
+async fn review_queue_payment_method_returns_pending(pool: PgPool) {
+    let pool = Arc::new(pool);
+    let owner_id = Uuid::new_v4();
+    do_import(&pool, owner_id).await;
+
+    let app = build_test_router(pool.clone(), owner_id);
+    let req = Request::builder()
+        .uri("/api/review-queue?scope=payment_method")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let arr: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+    assert!(
+        !arr.is_empty(),
+        "review queue for payment_method must be non-empty after import"
+    );
+    for item in &arr {
+        assert_eq!(item["scope"].as_str(), Some("payment_method"));
+        assert_eq!(item["review_state"].as_str(), Some("pending"));
+    }
+}
