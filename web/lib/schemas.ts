@@ -195,6 +195,79 @@ export const ConfirmEntityResponseSchema = z.object({
 
 export type ConfirmEntityResponse = z.infer<typeof ConfirmEntityResponseSchema>;
 
+// ─── M3: Products / Price History / Merchant Stats ─────────────────────────
+// server/src/api/products.rs, price.rs, merchant_stats.rs
+
+export const ProductItemSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  merchant_id: z.string().uuid().nullable(),
+  merchant_name: z.string().nullable(),
+  review_state: z.string(),
+  transaction_count: z.number().int(),
+});
+
+export type ProductItem = z.infer<typeof ProductItemSchema>;
+
+export const ProductListSchema = z.array(ProductItemSchema);
+
+export const PricePointSchema = z.object({
+  transaction_id: z.string().uuid(),
+  occurred_on: z.string(),
+  unit_price: DecimalSchema,
+  quantity: DecimalSchema.nullable(),
+  line_amount: DecimalSchema,
+  merchant_id: z.string().uuid().nullable(),
+  merchant_name: z.string().nullable(),
+  memo: z.string().nullable(),
+});
+
+export type PricePoint = z.infer<typeof PricePointSchema>;
+
+export const PriceHistoryResponseSchema = z.object({
+  product_id: z.string().uuid(),
+  product_name: z.string(),
+  merchant_id: z.string().uuid().nullable(),
+  merchant_name: z.string().nullable(),
+  points: z.array(PricePointSchema),
+  total: z.number().int(),
+  min_unit_price: DecimalSchema.nullable(),
+  max_unit_price: DecimalSchema.nullable(),
+  avg_unit_price: DecimalSchema.nullable(),
+});
+
+export type PriceHistoryResponse = z.infer<typeof PriceHistoryResponseSchema>;
+
+export const MerchantItemSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  review_state: z.string(),
+});
+
+export type MerchantItem = z.infer<typeof MerchantItemSchema>;
+
+export const MerchantListSchema = z.array(MerchantItemSchema);
+
+export const MonthlyMerchantPointSchema = z.object({
+  month: z.string(),
+  total: DecimalSchema,
+  transaction_count: z.number().int(),
+  memo_less_count: z.number().int(),
+});
+
+export type MonthlyMerchantPoint = z.infer<typeof MonthlyMerchantPointSchema>;
+
+export const MerchantStatsResponseSchema = z.object({
+  merchant_id: z.string().uuid(),
+  merchant_name: z.string(),
+  points: z.array(MonthlyMerchantPointSchema),
+  grand_total: DecimalSchema,
+  transaction_count: z.number().int(),
+  memo_less_count: z.number().int(),
+});
+
+export type MerchantStatsResponse = z.infer<typeof MerchantStatsResponseSchema>;
+
 // ─── 필터 파라미터 ──────────────────────────────────────────────────────────
 export const TransactionFilterSchema = z.object({
   from: z.string().optional(),

@@ -1,8 +1,10 @@
 pub mod aliases;
 pub mod categories;
 pub mod import;
+pub mod merchant_stats;
+pub mod price;
+pub mod products;
 pub mod settlement;
-pub mod stubs;
 pub mod summary;
 pub mod transactions;
 
@@ -16,7 +18,6 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::auth::{auth_middleware, JwksClient};
-use stubs::*;
 
 /// Full API router.
 pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
@@ -30,9 +31,13 @@ pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
         .route("/api/transactions", get(transactions::handle_get_transactions))
         .route("/api/summary/:year/:month", get(summary::handle_get_summary))
         .route("/api/settlement/:year/:month", get(settlement::handle_get_settlement))
-        .route("/api/price-history", get(handle_price_history))
-        .route("/api/products", get(handle_products))
-        .route("/api/merchant-stats", get(handle_merchant_stats))
+        // M3: price tracking + merchant stats
+        .route("/api/price-history", get(price::handle_get_price_history))
+        .route("/api/products", get(products::handle_get_products))
+        .route(
+            "/api/merchant-stats",
+            get(merchant_stats::handle_get_merchant_stats),
+        )
         // M2 Step B: alias CRUD
         .route("/api/aliases", post(aliases::handle_post_alias))
         .route("/api/aliases/:id", delete(aliases::handle_delete_alias))

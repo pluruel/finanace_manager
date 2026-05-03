@@ -61,6 +61,9 @@ finance_mananger/
 ### M2 Implementation Status
 M2 Steps A/B/C/D are all complete (2026-05-02). For full per-step details — endpoints, files touched, test counts, known limitations — see [PLAN.md §6](./PLAN.md). Do not duplicate that content here.
 
+### M3 Implementation Status
+M3 (price tracking + merchant stats) complete (2026-05-03). Backend: 3 new endpoints (`/api/products`, `/api/price-history`, `/api/merchant-stats`) in `server/src/api/{products,price,merchant_stats}.rs`. Frontend: `/price-history` page with Products / Merchants toggle (`web/app/(app)/price-history/page.tsx` + 3 new components). Backend 71 tests, frontend 86 tests. Multi-month comparison deferred until a second month of data is imported. Full details in [PLAN.md §6 M3](./PLAN.md).
+
 ---
 
 ## Deployment — Docker Compose
@@ -145,7 +148,7 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 
 - **M1**: Bootstrap + import — ✅ done (2026-04-25). 177 rows inserted from `2026년 02월.xlsx`, group-sum integrity 0 rows, tests passing.
 - **M2**: Normalization UI + monthly dashboard + settlement card — ✅ done (2026-05-02). Steps A/B/C/D all green; backend 62 / frontend 79 tests passing.
-- **M3**: Price tracking + merchant statistics + multi-month aggregation.
+- **M3**: Price tracking + merchant statistics + multi-month aggregation — ✅ done (2026-05-03). `/api/products`, `/api/price-history`, `/api/merchant-stats`; `/price-history` page Products / Merchants toggle. Backend 71 / frontend 86 tests passing. Acceptance: 6 고덕방 아이스아메리카노 rows show ₩3,400 each.
 
 ---
 
@@ -153,3 +156,4 @@ For the full schema, endpoints, normalization pipeline, and milestones, see [PLA
 
 - 2026-05-02: M2 Step B complete — alias CRUD, review queue, auto-remap backend done; merge uses SELECT FOR UPDATE + alias re-read under lock for race safety (memoed in project MEMORY.md for future reference)
 - 2026-05-02: M2 Step D complete — dashboard at `(app)/page.tsx` with month picker (URL `?ym=YYYY-MM`), settlement card, category × actor pivot, recent transactions. New components: `month-picker.tsx`, `settlement-card.tsx`, `summary-pivot.tsx`. Frontend tests 79/79 (10 new in `dashboard.test.tsx`); backend 62/62.
+- 2026-05-03: M3 complete — 3 new backend modules (`server/src/api/{products,price,merchant_stats}.rs`) wired into the router (M1 `stubs.rs` deleted), plus `/price-history` page with Products / Merchants toggle (`web/app/(app)/price-history/page.tsx`, `web/components/{price-history-controls,price-history-chart,merchant-stats-chart}.tsx`). Recharts mocked in `web/__tests__/price-history.test.tsx`. Backend 71/71 (9 new in `tests/test_m3.rs`), frontend 86/86 (7 new). Acceptance: 6 고덕방 아이스아메리카노 rows render at ₩3,400 each. PLAN's "≈167 memo-less rows" estimate corrected to actual ~64 (memo→product mapping is more aggressive than the Excel-row estimate suggested).
