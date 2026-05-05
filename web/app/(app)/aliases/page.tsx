@@ -28,7 +28,7 @@ export default function AliasesPage() {
               <strong>카테고리 탭</strong>: 카테고리 별칭 검토 및 확정
             </li>
             <li>
-              <strong>구매처 탭</strong>: 구매처 별칭 검토 (예: "이 마트" → "이마트")
+              <strong>구매처 탭</strong>: 구매처 별칭 검토 (예: &quot;이 마트&quot; → &quot;이마트&quot;)
             </li>
             <li>
               <strong>결제수단 탭</strong>: 결제수단 별칭 검토

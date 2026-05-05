@@ -1,74 +1,68 @@
 import { NextRequest, NextResponse } from "next/server";
+import { performRefresh } from "@/lib/perform-refresh";
+import {
+  accessCookieOptions,
+  refreshCookieOptions,
+  appendLegacyRefreshDelete,
+} from "@/lib/auth-cookies";
 
-const AUTH_BASE_URL =
-  process.env.AUTH_BASE_URL ?? "https://auth.junodevs.com";
+// Re-export the type so existing imports from this path keep working.
+export type { RefreshResult } from "@/lib/perform-refresh";
+
+// ── Route 핸들러 ───────────────────────────────────────────────────────────────
 
 /**
  * POST /api/auth/refresh
  *
- * refresh 쿠키를 읽어 auth-svc /auth/refresh에 JSON으로 전달한다.
- * MSA_INTEGRATION.md: POST /auth/refresh body: JSON { refresh_token }
- * 응답: AccessTokenResp (access_token만 재발급, refresh 변경 없음)
- *
- * 성공 시 새 access 토큰을 httpOnly 쿠키로 갱신한다.
+ * performRefresh를 호출하고 결과를 NextResponse로 변환한다.
+ * 비-OK 응답에는 access/refresh 쿠키 maxAge=0 삭제 헤더를 동반한다.
  */
 export async function POST(request: NextRequest) {
   const refreshToken = request.cookies.get("refresh")?.value;
-
-  if (!refreshToken) {
-    return NextResponse.json(
-      { detail: "No refresh token" },
-      { status: 401 },
-    );
-  }
-
-  let authRes: Response;
-  try {
-    authRes = await fetch(`${AUTH_BASE_URL}/auth/refresh`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    });
-  } catch (err) {
-    console.error("[auth/refresh] fetch error:", err);
-    return NextResponse.json(
-      { detail: "Auth service unavailable" },
-      { status: 502 },
-    );
-  }
-
-  if (!authRes.ok) {
-    const text = await authRes.text().catch(() => "");
-    return NextResponse.json(
-      { detail: text || "Refresh failed" },
-      { status: authRes.status },
-    );
-  }
-
-  const tokenResp = (await authRes.json()) as {
-    access_token: string;
-    token_type?: string;
-  };
-
-  if (!tokenResp.access_token) {
-    return NextResponse.json(
-      { detail: "Invalid refresh response" },
-      { status: 502 },
-    );
-  }
+  const result = await performRefresh(refreshToken);
 
   const isProduction = process.env.NODE_ENV === "production";
 
+  if (!result.ok) {
+    let detail: string;
+    if (result.status === 401) {
+      detail = "Refresh token expired or revoked";
+    } else if (result.status >= 500) {
+      detail = "Authentication service unavailable";
+    } else {
+      detail = "Refresh failed";
+    }
+
+    const response = NextResponse.json({ detail }, { status: result.status });
+
+    // 무효한 쿠키 삭제
+    response.cookies.set("access", "", {
+      ...accessCookieOptions(isProduction, 0),
+    });
+    response.cookies.set("refresh", "", {
+      ...refreshCookieOptions(isProduction, 0),
+    });
+
+    // 과도기 정리: 이전 배포에서 path="/" 로 발급된 stale refresh 쿠키 삭제
+    // (NextResponse.cookies.set은 동일 이름을 덮어쓰므로 headers.append로 직접 추가)
+    appendLegacyRefreshDelete(isProduction, response);
+
+    return response;
+  }
+
   const response = NextResponse.json({ ok: true });
-  response.cookies.set("access", tokenResp.access_token, {
-    httpOnly: true,
-    secure: isProduction,
-    sameSite: "lax",
-    path: "/",
-    maxAge: 60 * 15,
-  });
+
+  for (const cookie of result.setCookies) {
+    if (cookie.name === "access") {
+      response.cookies.set(cookie.name, cookie.value, {
+        ...accessCookieOptions(isProduction, cookie.maxAge),
+      });
+    } else if (cookie.name === "refresh") {
+      response.cookies.set(cookie.name, cookie.value, {
+        ...refreshCookieOptions(isProduction, cookie.maxAge),
+      });
+    }
+  }
 
   return response;
 }

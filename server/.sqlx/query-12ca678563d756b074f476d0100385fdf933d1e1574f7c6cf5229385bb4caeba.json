@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)\n           VALUES ($1, 'category', $2, $3, $4)\n           ON CONFLICT (owner_id, scope, norm_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "12ca678563d756b074f476d0100385fdf933d1e1574f7c6cf5229385bb4caeba"
+}

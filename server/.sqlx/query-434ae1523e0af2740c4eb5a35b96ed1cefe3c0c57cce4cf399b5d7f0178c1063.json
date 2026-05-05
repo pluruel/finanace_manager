@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'actor' AND norm_key = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "target_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "434ae1523e0af2740c4eb5a35b96ed1cefe3c0c57cce4cf399b5d7f0178c1063"
+}

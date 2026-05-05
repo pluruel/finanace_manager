@@ -38,6 +38,14 @@ User 도메인을 구현·수정할 때는 반드시 [`MSA_INTEGRATION.md`](./MS
 3. JWT는 **EdDSA**로 검증, `iss=auth-svc` / `aud` 배열에 `finance-manager` 포함 / `exp` 미만료 / `typ=access` 모두 확인
 4. refresh 토큰은 **httpOnly + Secure + SameSite 쿠키**에만 저장 (localStorage 금지)
 
+**BFF 인증 라우트 계약** (`web/app/api/auth/`):
+- `/api/auth/login` (POST): `username`(email) + `password` JSON → form-urlencoded 변환 후 auth-svc 호출. access 쿠키(`path=/`, expires_in 또는 15분), refresh 쿠키(`path=/api/auth`, 14일) 설정. 클라이언트에는 `{ok:true}`만.
+- `/api/auth/refresh` (POST): 우리 refresh 쿠키(`Cookie` 헤더로 `refresh_token=<v>`)로 auth-svc `/auth/refresh` 호출. **TokenPair 응답의 새 refresh_token을 우리 쿠키에 반드시 갱신**(rotation). 401 시 access·refresh 쿠키(`path=/` + path=/api/auth`) 모두 Max-Age=0.
+- `/api/auth/logout` (POST): refresh 쿠키를 Cookie 헤더로 auth-svc 호출(2s 타임아웃, 실패 무시). access·refresh 쿠키(두 path) 삭제.
+- middleware: self-fetch 없이 `performRefresh(refreshToken)`을 직접 호출. 401/실패 시 `/?from=<path>` 리다이렉트 + 쿠키 정리.
+- 공유 헬퍼(`web/lib/auth-cookies.ts`): `parseSetCookieNameValue`, `accessCookieOptions`(path=/), `refreshCookieOptions`(path=/api/auth), `appendLegacyRefreshDelete`(과도기 path=/ 정리).
+- `web/lib/perform-refresh.ts`: `performRefresh` 함수 + `RefreshResult` 타입. middleware와 refresh route 핸들러 모두 이 파일에서 import한다(Next.js는 route 파일의 비-HTTP 메서드 named export를 금지하므로 분리).
+
 ---
 
 ## 아키텍처
@@ -71,8 +79,8 @@ finance_mananger/
 ### M1 구현 현황
 - **마이그레이션**: 2개 (`001_init.sql` 스키마 전체 + pgcrypto, `002_fix_settlement_view.sql` 정산 뷰 수정)
 - **백엔드 엔드포인트**: `/health` (헬스체크), `POST /api/import` (xlsx 임포트, multipart, 20MB 한도, 멱등성 SHA-256, 단일 트랜잭션), `GET /api/transactions` (필터, 그룹 응답, 재귀 자식)
-- **프론트엔드 라우트**: `/login`, `/(app)/` (대시보드), `/transactions` (필터·정렬·그룹 펼침), `/import` (업로드 + 결과 표 + 무결성 경고), `/aliases` (M2 placeholder), `/price-history` (M3 placeholder)
-- **테스트**: 백엔드 `cargo test` 34 passed, 프론트 `npm test` 58 passed
+- **프론트엔드 라우트**: `/login`, `/(app)/` (대시보드), `/transactions` (필터·정렬·그룹 펼침), `/import` (업로드 + 결과 표 + 무결성 경고), `/api/auth/login|refresh|logout` (BFF 인증, TokenPair rotation, cookie transport), `/aliases` (M2 placeholder), `/price-history` (M3 placeholder). middleware는 performRefresh 직접 호출, 401 시 `/login?from=<path>` 리다이렉트.
+- **테스트**: 백엔드 `cargo test` 34 passed, 프론트 `npm test` 101 passed
 - **검증**: 골든 데이터 `2026년 02월.xlsx` 177건 삽입, v_monthly_settlement deducted_amount=7500 일치, 모든 그룹 무결성 검증 0행
 
 ---
@@ -106,7 +114,7 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 
 ### 테스트 실행 방법
 - **백엔드**: `cd server && cargo test -p server` (DATABASE_URL 필요, 임시 테스트 DB 자동 생성)
-- **프론트엔드**: `cd web && npm test` (vitest, 58 tests)
+- **프론트엔드**: `cd web && npm test` (vitest, 101 tests)
 
 ---
 

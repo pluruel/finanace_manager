@@ -52,3 +52,5 @@ model: sonnet
 - 2026-04-25: /api/import route handler는 stream forward (runtime=nodejs, dynamic=force-dynamic, duplex:"half") — multipart 스트리밍
 - 2026-04-25: 자동 401 재시도 금지 — middleware가 사전 refresh 책임
 - 2026-04-25: 패키지 매니저 npm + package-lock.json 고정 — pnpm 아님
+- 2026-05-04: BFF 인증 라우트 (/api/auth/login|refresh|logout) MSA 계약 구현 완료 — TokenPair rotation, refresh token 쿠키 path=/api/auth(과도기 path=/ 정리 포함), middleware performRefresh 직접 호출(self-fetch 제거)
+- 2026-05-04: 공유 헬퍼 lib/auth-cookies.ts(parseSetCookieNameValue, accessCookieOptions, refreshCookieOptions, appendLegacyRefreshDelete) — 라우트/middleware/테스트 간 쿠키 옵션 일관성 보장

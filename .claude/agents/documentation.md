@@ -106,3 +106,6 @@ model: haiku
 - 2026-04-25: PLAN.md M1 예측 행수 282 → 실측 177로 수정 — 구현이 헤더도 라인으로 저장하되 실제 그룹 수·자식 분포가 다름
 - 2026-04-25: CLAUDE.md에 "M1 구현 현황" 절 신설 — 마이그레이션, 엔드포인트, 테스트 통과 현황 문서화
 - 2026-04-25: 각 에이전트 누적 컨텍스트 초기화(M1 사실 기록) — 차후 M2 작업 시 참조
+- 2026-05-04: CLAUDE.md BFF 인증 라우트 계약 명시 — performRefresh 호출, TokenPair rotation, cookie path 분리(/|/api/auth), 과도기 정리(appendLegacyRefreshDelete)
+- 2026-05-04: 프론트엔드 테스트 카운트 58→101로 갱신 — BFF 인증 라우트 테스트 추가
+- 2026-05-05: CLAUDE.md 공유 헬퍼 절에 `web/lib/perform-refresh.ts` 추가 — Next.js route 파일의 비-HTTP named export 제약 우회, middleware + refresh handler에서 직접 import

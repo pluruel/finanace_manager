@@ -43,10 +43,9 @@ export async function POST(request: NextRequest) {
       },
       // request.body를 ReadableStream으로 직접 forward — 메모리 버퍼링 없음
       // duplex: "half"는 Node.js fetch에서 스트리밍 body 전송에 필요하지만 TS 타입 정의에 없음
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       body: request.body,
       duplex: "half",
-    } as any);
+    } as RequestInit & { duplex: string });
   } catch (err) {
     console.error("[api/import] fetch error:", err);
     return NextResponse.json(

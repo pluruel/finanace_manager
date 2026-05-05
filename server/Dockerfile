@@ -1,6 +1,6 @@
 # multi-stage Rust 빌드
 # Stage 1: builder
-FROM rust:1.82-slim AS builder
+FROM rust:1.95-slim AS builder
 
 # 시스템 의존성 설치
 RUN apt-get update && apt-get install -y \
@@ -20,9 +20,10 @@ RUN rm -rf src
 # 실제 소스 복사 및 빌드
 COPY src ./src
 COPY migrations ./migrations
+COPY .sqlx ./.sqlx
 # 소스 변경 타임스탬프 갱신
 RUN touch src/main.rs
-RUN cargo build --release
+RUN SQLX_OFFLINE=true cargo build --release
 
 # Stage 2: runtime
 FROM debian:bookworm-slim
