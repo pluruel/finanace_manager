@@ -2,7 +2,6 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
-import { formatKRW } from "@/lib/utils";
 import type { ActorDonutData, DonutSlice } from "@/lib/donut-data";
 
 type Props = {
@@ -12,6 +11,11 @@ type Props = {
 function pct(value: number, total: number): string {
   if (total === 0) return "0%";
   return `${((Math.abs(value) / Math.abs(total)) * 100).toFixed(1)}%`;
+}
+
+function fmtSigned(v: number): string {
+  const abs = Math.abs(v).toLocaleString("ko-KR");
+  return v < 0 ? `-₩${abs}` : `₩${abs}`;
 }
 
 export function ActorDonut({ data }: Props) {
@@ -42,12 +46,12 @@ export function ActorDonut({ data }: Props) {
                     paddingAngle={1}
                     stroke="none"
                   >
-                    {slices.map((s, i) => (
-                      <Cell key={i} fill={s.color} />
+                    {slices.map((s) => (
+                      <Cell key={s.name} fill={s.color} />
                     ))}
                   </Pie>
                   <Tooltip
-                    formatter={(v: number) => formatKRW(String(v))}
+                    formatter={(v: number) => `₩${v.toLocaleString("ko-KR")}`}
                     contentStyle={{ fontSize: 12 }}
                   />
                 </PieChart>
@@ -55,7 +59,7 @@ export function ActorDonut({ data }: Props) {
               <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
                 <span className="text-xs text-muted-foreground">합계</span>
                 <span className="text-base font-semibold tabular-nums">
-                  {formatKRW(String(total))}
+                  {fmtSigned(total)}
                 </span>
               </div>
             </div>
@@ -67,13 +71,14 @@ export function ActorDonut({ data }: Props) {
                 >
                   <span className="flex items-center gap-2 truncate">
                     <span
+                      aria-hidden="true"
                       className="inline-block h-2.5 w-2.5 rounded-sm shrink-0"
                       style={{ backgroundColor: s.color }}
                     />
                     <span className="truncate">{s.name}</span>
                   </span>
                   <span className="tabular-nums text-muted-foreground shrink-0">
-                    {formatKRW(String(s.value))} · {pct(s.value, total)}
+                    {fmtSigned(s.value)} · {pct(s.value, total)}
                   </span>
                 </li>
               ))}
