@@ -104,6 +104,11 @@ Deployment / run flow:
 - **Backend**: `cd server && cargo test -p server` (requires `DATABASE_URL`; an ephemeral test DB is created automatically).
 - **Frontend**: `cd web && npm test` (vitest, 58 tests).
 
+### Subagent Model Policy
+When running subagent-driven development:
+- **Implementer subagents**: use `sonnet`.
+- **Reviewer subagents** (spec compliance, code quality, final review): use `opus`.
+
 ---
 
 ## Core Domain Rules
