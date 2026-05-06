@@ -4,6 +4,7 @@ use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
 use std::io::Cursor;
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::domain::RawRow;
@@ -207,11 +208,10 @@ pub fn parse_xlsx(bytes: &[u8], sheet_name: &str) -> Result<Vec<RawRow>> {
 
 /// 파일명에서 시트명 추출: "2026년 02월.xlsx" → "2월"
 pub fn extract_sheet_name(filename: &str) -> Option<String> {
-    let base = filename.strip_suffix(".xlsx").unwrap_or(filename);
-    // "2026년 02월" → 월 부분 추출
+    let filename: String = filename.nfc().collect();
+    let base = filename.strip_suffix(".xlsx").unwrap_or(&filename);
     if let Some(year_pos) = base.find('년') {
         let after_year = &base[year_pos + '년'.len_utf8()..];
-        // after_year = " 02월" 또는 "02월"
         let trimmed = after_year.trim();
         if let Some(month_pos) = trimmed.find('월') {
             let month_str = trimmed[..month_pos].trim().trim_start_matches('0');
@@ -225,8 +225,8 @@ pub fn extract_sheet_name(filename: &str) -> Option<String> {
 
 /// 파일명에서 (year, month) 추출: "2026년 02월.xlsx" → (2026, 2)
 pub fn extract_year_month(filename: &str) -> Option<(i32, i32)> {
-    let base = filename.strip_suffix(".xlsx").unwrap_or(filename);
-    // "2026년 02월"
+    let filename: String = filename.nfc().collect();
+    let base = filename.strip_suffix(".xlsx").unwrap_or(&filename);
     let year_pos = base.find('년')?;
     let year: i32 = base[..year_pos].trim().parse().ok()?;
 
@@ -251,6 +251,9 @@ mod tests {
     fn test_extract_year_month() {
         assert_eq!(extract_year_month("2026년 02월.xlsx"), Some((2026, 2)));
         assert_eq!(extract_year_month("2026년 12월.xlsx"), Some((2026, 12)));
+        // macOS HFS+/APFS stores Korean in NFD; browser sends it as-is
+        let nfd = "2026\u{1102}\u{1167}\u{11AB} 02\u{110B}\u{116F}\u{11AF}.xlsx";
+        assert_eq!(extract_year_month(nfd), Some((2026, 2)));
     }
 
     #[test]
