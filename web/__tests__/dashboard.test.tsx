@@ -9,6 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { MonthPicker } from "../components/month-picker";
 import { SettlementCard } from "../components/settlement-card";
 import { ActorDonut } from "../components/actor-donut";
+import { DashboardDonuts } from "../components/dashboard-donuts";
 import { buildActorSlices } from "../lib/donut-data";
 import type { SummaryResponse, Settlement } from "../lib/schemas";
 
@@ -164,5 +165,51 @@ describe("ActorDonut", () => {
     expect(screen.getByText("₩107,500")).toBeTruthy();
     expect(screen.getByText("외식")).toBeTruthy();
     expect(screen.getByText("차감")).toBeTruthy();
+  });
+});
+
+describe("DashboardDonuts", () => {
+  const A = "00000000-0000-0000-0000-0000000000aa";
+  const B = "00000000-0000-0000-0000-0000000000bb";
+
+  it("renders empty card when data is null", () => {
+    render(<DashboardDonuts data={null} />);
+    expect(screen.getByTestId("dashboard-donuts-empty")).toBeTruthy();
+    expect(screen.queryByTestId("dashboard-donuts")).toBeNull();
+  });
+
+  it("renders empty card when no actor has any slices", () => {
+    const data: SummaryResponse = {
+      year: 2026,
+      month: 2,
+      actors: [{ actor_id: A, actor_name: "공동" }],
+      categories: [],
+    };
+    render(<DashboardDonuts data={data} />);
+    expect(screen.getByTestId("dashboard-donuts-empty")).toBeTruthy();
+  });
+
+  it("renders one ActorDonut per actor with non-empty slices and skips empty actors", () => {
+    const data: SummaryResponse = {
+      year: 2026,
+      month: 2,
+      actors: [
+        { actor_id: A, actor_name: "공동" },
+        { actor_id: B, actor_name: "엉아" },
+      ],
+      categories: [
+        {
+          category_id: "11111111-1111-1111-1111-111111111111",
+          category_name: "외식",
+          kind: "expense",
+          by_actor: [{ actor_id: A, actor_name: "공동", amount: "1000", sign: 1 }],
+          total: "1000",
+        },
+      ],
+    };
+    render(<DashboardDonuts data={data} />);
+    expect(screen.getByTestId("dashboard-donuts")).toBeTruthy();
+    expect(screen.getByTestId("actor-donut-공동")).toBeTruthy();
+    expect(screen.queryByTestId("actor-donut-엉아")).toBeNull();
   });
 });

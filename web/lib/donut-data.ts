@@ -107,3 +107,26 @@ export function buildActorSlices(
 
   return { actorId, actorName, total, slices };
 }
+
+export function collectOrderedActorIds(
+  data: SummaryResponse | null,
+): Array<string | null> {
+  if (!data) return [];
+  const seen = new Set<string | null>();
+  const ordered: Array<string | null> = [];
+  for (const a of data.actors) {
+    if (!seen.has(a.actor_id)) {
+      seen.add(a.actor_id);
+      ordered.push(a.actor_id);
+    }
+  }
+  for (const cat of data.categories) {
+    for (const cell of cat.by_actor) {
+      if (!seen.has(cell.actor_id)) {
+        seen.add(cell.actor_id);
+        ordered.push(cell.actor_id);
+      }
+    }
+  }
+  return ordered;
+}

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildActorSlices, DEDUCTION_COLOR, OTHER_COLOR } from "../lib/donut-data";
+import { buildActorSlices, collectOrderedActorIds, DEDUCTION_COLOR, OTHER_COLOR } from "../lib/donut-data";
 import type { SummaryResponse } from "../lib/schemas";
 
 const ACTOR_A = "00000000-0000-0000-0000-0000000000aa";
@@ -151,5 +151,89 @@ describe("buildActorSlices", () => {
     const result = buildActorSlices(data, null);
     expect(result.actorName).toBe("미지정");
     expect(result.slices.map((s) => s.name)).toEqual(["외식"]);
+  });
+});
+
+describe("collectOrderedActorIds", () => {
+  const A = "00000000-0000-0000-0000-0000000000aa";
+  const B = "00000000-0000-0000-0000-0000000000bb";
+  const C = "00000000-0000-0000-0000-0000000000cc";
+
+  it("returns empty array when data is null", () => {
+    expect(collectOrderedActorIds(null)).toEqual([]);
+  });
+
+  it("preserves data.actors order when all actors appear in cells too", () => {
+    const data: SummaryResponse = {
+      year: 2026,
+      month: 2,
+      actors: [
+        { actor_id: A, actor_name: "공동" },
+        { actor_id: B, actor_name: "엉아" },
+      ],
+      categories: [
+        {
+          category_id: "11111111-1111-1111-1111-111111111111",
+          category_name: "외식",
+          kind: "expense",
+          by_actor: [
+            { actor_id: B, actor_name: "엉아", amount: "100", sign: 1 },
+            { actor_id: A, actor_name: "공동", amount: "200", sign: 1 },
+          ],
+          total: "300",
+        },
+      ],
+    };
+    expect(collectOrderedActorIds(data)).toEqual([A, B]);
+  });
+
+  it("appends actors that appear only in by_actor cells (e.g., null) at the end", () => {
+    const data: SummaryResponse = {
+      year: 2026,
+      month: 2,
+      actors: [{ actor_id: A, actor_name: "공동" }],
+      categories: [
+        {
+          category_id: "11111111-1111-1111-1111-111111111111",
+          category_name: "외식",
+          kind: "expense",
+          by_actor: [
+            { actor_id: A, actor_name: "공동", amount: "100", sign: 1 },
+            { actor_id: null, actor_name: "미지정", amount: "50", sign: 1 },
+            { actor_id: C, actor_name: "신규", amount: "30", sign: 1 },
+          ],
+          total: "180",
+        },
+      ],
+    };
+    expect(collectOrderedActorIds(data)).toEqual([A, null, C]);
+  });
+
+  it("dedupes repeated actor_ids (including null) across categories", () => {
+    const data: SummaryResponse = {
+      year: 2026,
+      month: 2,
+      actors: [],
+      categories: [
+        {
+          category_id: "11111111-1111-1111-1111-111111111111",
+          category_name: "외식",
+          kind: "expense",
+          by_actor: [{ actor_id: null, actor_name: "미지정", amount: "10", sign: 1 }],
+          total: "10",
+        },
+        {
+          category_id: "22222222-2222-2222-2222-222222222222",
+          category_name: "쇼핑",
+          kind: "expense",
+          by_actor: [
+            { actor_id: null, actor_name: "미지정", amount: "20", sign: 1 },
+            { actor_id: A, actor_name: "공동", amount: "30", sign: 1 },
+          ],
+          total: "50",
+        },
+      ],
+    };
+    expect(collectOrderedActorIds(data)).toEqual([null, A]);
   });
 });
