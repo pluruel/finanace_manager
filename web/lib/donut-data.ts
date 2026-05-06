@@ -15,14 +15,14 @@ export type ActorDonutData = {
   slices: DonutSlice[];
 };
 
-const PALETTE = [
+export const PALETTE = [
   "#2563eb",
   "#16a34a",
   "#f59e0b",
   "#db2777",
   "#7c3aed",
   "#0891b2",
-];
+] as const;
 export const OTHER_COLOR = "#94a3b8";
 export const DEDUCTION_COLOR = "#6b7280";
 
@@ -33,7 +33,7 @@ const OTHER_NAME = "기타";
 function signedNumber(amount: string, sign: number): number {
   const v = parseFloat(amount);
   if (Number.isNaN(v)) return 0;
-  return sign === -1 ? -v : v;
+  return sign < 0 ? -v : v;
 }
 
 function actorNameFor(data: SummaryResponse, actorId: string | null): string {
