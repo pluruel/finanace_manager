@@ -203,3 +203,60 @@ export function collectOrderedActorIds(
   }
   return ordered;
 }
+
+/**
+ * 단일 액터의 수입 슬라이스. expense 와 다른 점:
+ *   - 차감 제외 로직 불필요 (income kind 만 들어옴)
+ *   - 부호 그대로 (양수)
+ */
+export function buildActorIncomeSlices(
+  income: IncomeResponse | null,
+  actorId: string | null,
+): ActorDonutData {
+  if (!income) {
+    return { actorId, actorName: actorId ?? "미지정", total: 0, slices: [] };
+  }
+  const raws: ExpenseRaw[] = [];
+  for (const cat of income.categories) {
+    const cell = cat.by_actor.find((e) => e.actor_id === actorId);
+    if (!cell) continue;
+    const v = parseFloat(cell.amount);
+    if (Number.isNaN(v) || v === 0) continue;
+    raws.push({ name: cat.category_name, value: v });
+  }
+  const total = raws.reduce((acc, r) => acc + r.value, 0);
+  const slices = topNWithOther(raws);
+  return { actorId, actorName: actorId ?? "미지정", total, slices };
+}
+
+/**
+ * 가구 전체 수입 — 모든 액터의 income 을 카테고리별로 합산.
+ */
+export function buildHouseholdIncomeSlices(
+  income: IncomeResponse | null,
+): ActorDonutData {
+  if (!income) {
+    return { actorId: "household", actorName: HOUSEHOLD_NAME, total: 0, slices: [] };
+  }
+  const sums = new Map<string, number>();
+  for (const cat of income.categories) {
+    let agg = 0;
+    for (const cell of cat.by_actor) {
+      const v = parseFloat(cell.amount);
+      if (!Number.isNaN(v)) agg += v;
+    }
+    if (agg !== 0) sums.set(cat.category_name, agg);
+  }
+  const raws: ExpenseRaw[] = Array.from(sums.entries()).map(([name, value]) => ({
+    name,
+    value,
+  }));
+  const total = raws.reduce((acc, r) => acc + r.value, 0);
+  const slices = topNWithOther(raws);
+  return {
+    actorId: "household",
+    actorName: HOUSEHOLD_NAME,
+    total,
+    slices,
+  };
+}

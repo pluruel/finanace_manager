@@ -279,6 +279,7 @@ export const IncomeResponseSchema = z.object({
   month: z.string(),
   by_actor: z.array(IncomeByActorSchema),
   total: DecimalSchema,
+  categories: z.array(CategorySummarySchema),
 });
 
 export type IncomeResponse = z.infer<typeof IncomeResponseSchema>;

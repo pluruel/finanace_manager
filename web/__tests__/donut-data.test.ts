@@ -3,6 +3,8 @@ import {
   buildActorSlices,
   buildHouseholdSlices,
   buildDeductionByActor,
+  buildActorIncomeSlices,
+  buildHouseholdIncomeSlices,
   incomeFor,
   collectOrderedActorIds,
   EXPENSE_PALETTE,
@@ -222,5 +224,121 @@ describe("collectOrderedActorIds", () => {
       categories: [],
     };
     expect(collectOrderedActorIds(data)).toEqual([A, B]);
+  });
+});
+
+describe("buildActorIncomeSlices (수입 도넛)", () => {
+  function makeIncome(
+    cats: Array<{ name: string; cells: Array<{ actor: string | null; actorName: string; amount: string }> }>,
+  ): IncomeResponse {
+    return {
+      month: "2026-02",
+      by_actor: [],
+      total: "0",
+      categories: cats.map((c, i) => ({
+        category_id: `${"2".repeat(8)}-2222-2222-2222-${String(i).padStart(12, "0")}`,
+        category_name: c.name,
+        kind: "income",
+        by_actor: c.cells.map((cell) => ({
+          actor_id: cell.actor,
+          actor_name: cell.actorName,
+          amount: cell.amount,
+        })),
+        total: "0",
+      })),
+    };
+  }
+
+  it("특정 액터의 income 카테고리를 슬라이스로 반환", () => {
+    const income = makeIncome([
+      { name: "급여", cells: [{ actor: ACTOR_A, actorName: "공동", amount: "3000000" }] },
+      { name: "보험금", cells: [{ actor: ACTOR_A, actorName: "공동", amount: "100000" }] },
+    ]);
+    const result = buildActorIncomeSlices(income, ACTOR_A);
+    expect(result.actorId).toBe(ACTOR_A);
+    expect(result.slices.map((s) => s.name).sort()).toEqual(["급여", "보험금"]);
+    expect(result.total).toBe(3100000);
+  });
+
+  it("EXPENSE_PALETTE 를 재사용한다", () => {
+    const income = makeIncome([
+      { name: "급여", cells: [{ actor: ACTOR_A, actorName: "공동", amount: "1000" }] },
+    ]);
+    const result = buildActorIncomeSlices(income, ACTOR_A);
+    expect(result.slices[0].color).toBe(EXPENSE_PALETTE[0]);
+  });
+
+  it("입력이 null 이면 빈 결과", () => {
+    const result = buildActorIncomeSlices(null, ACTOR_A);
+    expect(result.slices).toEqual([]);
+    expect(result.total).toBe(0);
+  });
+
+  it("해당 액터 셀이 없으면 빈 슬라이스", () => {
+    const income = makeIncome([
+      { name: "급여", cells: [{ actor: ACTOR_B, actorName: "엉아", amount: "1000" }] },
+    ]);
+    const result = buildActorIncomeSlices(income, ACTOR_A);
+    expect(result.slices).toEqual([]);
+    expect(result.total).toBe(0);
+  });
+
+  it("7개 income 카테고리 → top-6 + 기타", () => {
+    const income = makeIncome(
+      Array.from({ length: 7 }, (_, i) => ({
+        name: `i${i + 1}`,
+        cells: [{ actor: ACTOR_A, actorName: "공동", amount: String((i + 1) * 1000) }],
+      })),
+    );
+    const result = buildActorIncomeSlices(income, ACTOR_A);
+    expect(result.slices.map((s) => s.name)).toEqual([
+      "i7", "i6", "i5", "i4", "i3", "i2", "기타",
+    ]);
+    expect(result.slices[6].color).toBe(OTHER_COLOR);
+  });
+});
+
+describe("buildHouseholdIncomeSlices (가구 합계 수입 도넛)", () => {
+  function makeIncome(
+    cats: Array<{ name: string; cells: Array<{ actor: string; actorName: string; amount: string }> }>,
+  ): IncomeResponse {
+    return {
+      month: "2026-02",
+      by_actor: [],
+      total: "0",
+      categories: cats.map((c, i) => ({
+        category_id: `${"3".repeat(8)}-3333-3333-3333-${String(i).padStart(12, "0")}`,
+        category_name: c.name,
+        kind: "income",
+        by_actor: c.cells.map((cell) => ({
+          actor_id: cell.actor,
+          actor_name: cell.actorName,
+          amount: cell.amount,
+        })),
+        total: "0",
+      })),
+    };
+  }
+
+  it("모든 액터를 카테고리별로 합산", () => {
+    const income = makeIncome([
+      {
+        name: "급여",
+        cells: [
+          { actor: ACTOR_A, actorName: "공동", amount: "1000" },
+          { actor: ACTOR_B, actorName: "엉아", amount: "2000" },
+        ],
+      },
+    ]);
+    const result = buildHouseholdIncomeSlices(income);
+    expect(result.actorName).toBe("가구 합계");
+    expect(result.slices.map((s) => s.name)).toEqual(["급여"]);
+    expect(result.total).toBe(3000);
+  });
+
+  it("입력 null 이면 빈 결과", () => {
+    const result = buildHouseholdIncomeSlices(null);
+    expect(result.slices).toEqual([]);
+    expect(result.total).toBe(0);
   });
 });
