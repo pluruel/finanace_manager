@@ -265,6 +265,23 @@ export const MerchantStatsResponseSchema = z.object({
 
 export type MerchantStatsResponse = z.infer<typeof MerchantStatsResponseSchema>;
 
+// ─── Income (수입) — server/src/api/income.rs ─────────────────────────────
+export const IncomeByActorSchema = z.object({
+  actor_id: z.string().uuid().nullable(),
+  actor_name: z.string(),
+  total: DecimalSchema,
+});
+
+export type IncomeByActor = z.infer<typeof IncomeByActorSchema>;
+
+export const IncomeResponseSchema = z.object({
+  month: z.string(),
+  by_actor: z.array(IncomeByActorSchema),
+  total: DecimalSchema,
+});
+
+export type IncomeResponse = z.infer<typeof IncomeResponseSchema>;
+
 // ─── 필터 파라미터 ──────────────────────────────────────────────────────────
 export const TransactionFilterSchema = z.object({
   from: z.string().optional(),

@@ -10,8 +10,9 @@ import { MonthPicker } from "../components/month-picker";
 import { SettlementCard } from "../components/settlement-card";
 import { ActorDonut } from "../components/actor-donut";
 import { DashboardDonuts } from "../components/dashboard-donuts";
+import { IncomeStrip } from "../components/income-strip";
 import { buildActorSlices } from "../lib/donut-data";
-import type { SummaryResponse, Settlement } from "../lib/schemas";
+import type { SummaryResponse, Settlement, IncomeResponse } from "../lib/schemas";
 
 const mockPush = vi.fn();
 
@@ -165,6 +166,23 @@ describe("ActorDonut", () => {
     expect(screen.getByText("₩107,500")).toBeTruthy();
     expect(screen.getByText("외식")).toBeTruthy();
     expect(screen.getByText("차감")).toBeTruthy();
+  });
+});
+
+describe("IncomeStrip", () => {
+  it("월 수입 레이블과 액터별 금액을 렌더한다", () => {
+    const data: IncomeResponse = {
+      month: "2026-02",
+      by_actor: [
+        { actor_id: "11111111-1111-1111-1111-111111111111", actor_name: "공동", total: "0" },
+        { actor_id: "22222222-2222-2222-2222-222222222222", actor_name: "엉아", total: "1000" },
+      ],
+      total: "1000",
+    };
+    render(<IncomeStrip data={data} />);
+    expect(screen.getByText("월 수입")).toBeTruthy();
+    expect(screen.getByText("공동")).toBeTruthy();
+    expect(screen.getByText("엉아")).toBeTruthy();
   });
 });
 
