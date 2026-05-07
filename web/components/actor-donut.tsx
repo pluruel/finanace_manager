@@ -3,7 +3,6 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import type { ActorDonutData, DonutSlice } from "@/lib/donut-data";
-import { INCOME_COLOR } from "@/lib/donut-data";
 
 type Props = {
   data: ActorDonutData;
@@ -38,7 +37,6 @@ export function ActorDonut({ data, income }: Props) {
               <div
                 data-testid="donut-income"
                 className="flex items-center justify-between text-sm"
-                style={{ color: INCOME_COLOR }}
               >
                 <span className="font-medium">수입</span>
                 <span className="font-mono font-semibold tabular-nums">

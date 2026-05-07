@@ -15,23 +15,24 @@ export type ActorDonutData = {
   slices: DonutSlice[];
 };
 
-// blue/cyan/indigo 톤. 도넛 전체가 "지출 = 파랑" 으로 읽히게 하면서 슬라이스 구분도 가능.
+// 카테고리별 슬라이스 구분이 잘 되도록 채도 균형 잡힌 qualitative 팔레트.
 export const EXPENSE_PALETTE = [
-  "#1e40af", // blue-800
-  "#2563eb", // blue-600
-  "#3b82f6", // blue-500
-  "#0891b2", // cyan-600
-  "#0e7490", // cyan-700
   "#6366f1", // indigo-500
+  "#10b981", // emerald-500
+  "#f59e0b", // amber-500
+  "#06b6d4", // cyan-500
+  "#a855f7", // purple-500
+  "#f97316", // orange-500
+  "#14b8a6", // teal-500
+  "#ec4899", // pink-500
 ] as const;
 
 export const OTHER_COLOR = "#94a3b8"; // slate-400
-export const INCOME_COLOR = "#dc2626"; // red-600 (헤더 텍스트)
 export const DEDUCTION_PALETTE = [
-  "#4b5563", // gray-600
-  "#6b7280", // gray-500
-  "#9ca3af", // gray-400
-  "#d1d5db", // gray-300
+  "#be123c", // rose-700
+  "#c2410c", // orange-700
+  "#a16207", // yellow-700
+  "#65a30d", // lime-600
 ] as const;
 
 const TOP_N = 6;

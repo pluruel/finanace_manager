@@ -134,7 +134,7 @@ describe("ActorDonut", () => {
     expect(screen.getByTestId("donut-empty")).toBeTruthy();
   });
 
-  it("수입 > 0 이면 빨간색 수입 헤더 행을 렌더한다", () => {
+  it("수입 > 0 이면 수입 헤더 행을 렌더한다 (기본 텍스트 색)", () => {
     const data: SummaryResponse = {
       year: 2026,
       month: 2,
