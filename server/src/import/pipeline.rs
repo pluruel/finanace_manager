@@ -49,7 +49,8 @@ async fn upsert_category(
     // ON CONFLICT DO NOTHING 으로 기존 row 의 kind 는 보존됨 (사용자 토글 / 잘못된 휴리스틱
     // 모두 한 번 결정되면 유지). 휴리스틱은 보조이지 정답이 아님 — 실데이터에서 false positive 가
     // 발견되면 /aliases Categories 탭에서 토글하면 영구 보존됨.
-    const INCOME_KEYWORDS: &[&str] = &["급여", "수입", "회수", "환급"];
+    // "보험" 단독은 보험료(지출)로 두고, 부호 분리된 income 측 카테고리 이름인 "보험금"만 매칭.
+    const INCOME_KEYWORDS: &[&str] = &["급여", "수입", "회수", "환급", "보험금"];
     let kind = if INCOME_KEYWORDS.iter().any(|kw| norm.contains(kw)) {
         "income"
     } else {
@@ -500,7 +501,19 @@ pub async fn run_pipeline(
             }
         };
 
-        // 3. Normalize each text column → entity id.
+        // 3. amount 계산 — Excel 은 지출 장부 부호 (지출 양수, 환불 음수).
+        //    DB 는 캐시플로우 부호 (유입 양수, 유출 음수). 그래서 부호 반전.
+        //    환불은 저장 후 양수가 되어 같은 expense 카테고리 안에서 자연 차감.
+        let raw_amount = match row.line_amount.or(row.total_amount) {
+            Some(a) => a,
+            None => {
+                tracing::warn!("Row {}: no amount, skipping", row.row_index);
+                continue;
+            }
+        };
+        let amount = -raw_amount;
+
+        // 4. Normalize each text column → entity id.
 
         // merchant
         let merchant_id = if let Some(ref text) = row.merchant_text {
@@ -525,14 +538,22 @@ pub async fn run_pipeline(
             None
         };
 
-        // category
+        // category — 보험 부호 분리 규칙:
+        //   Excel 양수("보험" 보험료 지출) → "보험" (kind=expense)
+        //   Excel 음수("보험" 환급/보험금 수령) → "보험금" (kind=income, INCOME_KEYWORDS 매칭)
+        // 정확히 norm_key=="보험" 인 행에만 적용 — "자동차보험" 같은 명시적 지출 카테고리는 그대로 둔다.
         let category_id = if let Some(ref text) = row.category_text {
-            let (id, is_new) = upsert_category(conn, owner_id, text).await?;
+            let resolved_text: String = if to_norm_key(text) == "보험" && raw_amount.is_sign_negative() {
+                "보험금".to_string()
+            } else {
+                text.clone()
+            };
+            let (id, is_new) = upsert_category(conn, owner_id, &resolved_text).await?;
             if is_new {
                 unresolved.push(UnresolvedAlias {
                     scope: "category".to_string(),
-                    raw_text: text.clone(),
-                    norm_key: to_norm_key(text),
+                    raw_text: resolved_text.clone(),
+                    norm_key: to_norm_key(&resolved_text),
                 });
             }
             Some(id)
@@ -547,18 +568,6 @@ pub async fn run_pipeline(
         } else {
             None
         };
-
-        // 4. amount 계산 — Excel 은 지출 장부 부호 (지출 양수, 환불 음수).
-        //    DB 는 캐시플로우 부호 (유입 양수, 유출 음수). 그래서 부호 반전.
-        //    환불은 저장 후 양수가 되어 같은 expense 카테고리 안에서 자연 차감.
-        let raw_amount = match row.line_amount.or(row.total_amount) {
-            Some(a) => a,
-            None => {
-                tracing::warn!("Row {}: no amount, skipping", row.row_index);
-                continue;
-            }
-        };
-        let amount = -raw_amount;
 
         // 5. Product mapping (memo-bearing rows only).
         let product_id = if let (Some(ref memo), Some(merch_id)) = (&row.memo, merchant_id) {

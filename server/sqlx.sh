@@ -12,8 +12,8 @@ export DATABASE_URL
 echo "→ removing old .sqlx/"
 rm -rf .sqlx
 
-echo "→ running cargo sqlx prepare against $DATABASE_URL"
-cargo sqlx prepare
+echo "→ running cargo sqlx prepare --all-targets against $DATABASE_URL"
+cargo sqlx prepare -- --all-targets
 
 count=$(find .sqlx -name 'query-*.json' | wc -l)
 echo "✓ generated $count query files in .sqlx/"
