@@ -29,14 +29,14 @@ export function ActorDonut({ data, income }: Props) {
       </CardHeader>
       <CardContent>
         {hasNothing ? (
-          <p className="text-sm text-muted-foreground" data-testid="actor-donut-empty">
+          <p className="text-sm text-muted-foreground" data-testid="donut-empty">
             이 달의 거래 내역이 없습니다.
           </p>
         ) : (
           <div className="flex flex-col gap-3">
             {hasIncome && (
               <div
-                data-testid="actor-donut-income"
+                data-testid="donut-income"
                 className="flex items-center justify-between text-sm"
                 style={{ color: INCOME_COLOR }}
               >
@@ -72,7 +72,7 @@ export function ActorDonut({ data, income }: Props) {
                     </PieChart>
                   </ResponsiveContainer>
                   <div
-                    data-testid="actor-donut-center"
+                    data-testid="donut-center"
                     className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center"
                   >
                     <span className="text-xs text-muted-foreground">지출</span>
@@ -104,7 +104,7 @@ export function ActorDonut({ data, income }: Props) {
               </>
             ) : (
               <p
-                data-testid="actor-donut-no-expense"
+                data-testid="donut-no-expense"
                 className="text-sm text-muted-foreground"
               >
                 이 달 지출 없음.

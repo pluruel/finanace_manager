@@ -1,11 +1,16 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PieChart } from "lucide-react";
 import { ActorDonut } from "./actor-donut";
-import { buildActorSlices, collectOrderedActorIds } from "@/lib/donut-data";
-import type { SummaryResponse } from "@/lib/schemas";
+import {
+  buildActorSlices,
+  buildHouseholdSlices,
+  incomeFor,
+} from "@/lib/donut-data";
+import type { SummaryResponse, IncomeResponse } from "@/lib/schemas";
 
 type Props = {
-  data: SummaryResponse | null;
+  summary: SummaryResponse | null;
+  income: IncomeResponse | null;
 };
 
 function EmptyDonutsCard() {
@@ -26,25 +31,28 @@ function EmptyDonutsCard() {
   );
 }
 
-export function DashboardDonuts({ data }: Props) {
-  const ordered = collectOrderedActorIds(data);
-  const knownActorIds = new Set<string | null>(
-    data?.actors.map((a) => a.actor_id) ?? [],
-  );
-  const allDonuts = data ? ordered.map((actorId) => buildActorSlices(data, actorId)) : [];
-  // Keep cards for any actor declared in data.actors (even if empty, to preserve
-  // the stable 3-column grid). Drop only stray actor_ids that came in via
-  // by_actor cells but produced no slices.
-  const donuts = allDonuts.filter(
-    (d) => knownActorIds.has(d.actorId) || d.slices.length > 0,
-  );
+const PERSON_NAMES = ["아기", "엉아"] as const;
 
-  if (donuts.length === 0) return <EmptyDonutsCard />;
+export function DashboardDonuts({ summary, income }: Props) {
+  if (!summary) return <EmptyDonutsCard />;
+
+  const householdData = buildHouseholdSlices(summary);
+  const householdIncome = incomeFor(income, "household");
+
+  const personCards = PERSON_NAMES.map((name) => {
+    const actor = summary.actors.find((a) => a.actor_name === name);
+    const data = actor
+      ? buildActorSlices(summary, actor.actor_id)
+      : { actorId: null, actorName: name, total: 0, slices: [] };
+    const personIncome = actor ? incomeFor(income, actor.actor_id) : 0;
+    return { data, income: personIncome };
+  });
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4" data-testid="dashboard-donuts">
-      {donuts.map((d) => (
-        <ActorDonut key={d.actorId ?? "unset"} data={d} />
+      <ActorDonut data={householdData} income={householdIncome} />
+      {personCards.map((pc) => (
+        <ActorDonut key={pc.data.actorName} data={pc.data} income={pc.income} />
       ))}
     </div>
   );
