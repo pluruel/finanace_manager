@@ -11,7 +11,7 @@ import { SettlementCard } from "../components/settlement-card";
 import { ActorDonut } from "../components/actor-donut";
 import { DashboardDonuts } from "../components/dashboard-donuts";
 import { DeductionDonut } from "../components/deduction-donut";
-import { buildActorSlices } from "../lib/donut-data";
+import { buildActorSlices, buildActorIncomeSlices } from "../lib/donut-data";
 import type { SummaryResponse, Settlement, IncomeResponse } from "../lib/schemas";
 
 const mockPush = vi.fn();
@@ -122,32 +122,40 @@ describe("SettlementCard compact mode", () => {
 
 describe("ActorDonut", () => {
   const ACTOR_A = "00000000-0000-0000-0000-0000000000aa";
+  const EMPTY_DONUT = { actorId: null, actorName: "공동", total: 0, slices: [] };
 
-  it("수입 = 0 && 슬라이스 0 일 때 빈 카드 placeholder 만 렌더", () => {
-    const data: SummaryResponse = {
-      year: 2026,
-      month: 2,
-      actors: [{ actor_id: ACTOR_A, actor_name: "공동" }],
-      categories: [],
+  function makeIncomeOne(actorId: string, amount: string): IncomeResponse {
+    return {
+      month: "2026-02",
+      by_actor: [],
+      total: "0",
+      categories: [
+        {
+          category_id: "99999999-9999-9999-9999-999999999999",
+          category_name: "급여",
+          kind: "income",
+          by_actor: [{ actor_id: actorId, actor_name: "공동", amount }],
+          total: amount,
+        },
+      ],
     };
-    render(<ActorDonut data={buildActorSlices(data, ACTOR_A)} income={0} />);
+  }
+
+  it("수입/지출 모두 비면 빈 placeholder", () => {
+    render(<ActorDonut expense={EMPTY_DONUT} income={EMPTY_DONUT} />);
     expect(screen.getByTestId("donut-empty")).toBeTruthy();
   });
 
-  it("수입 > 0 이면 수입 헤더 행을 렌더한다 (기본 텍스트 색)", () => {
-    const data: SummaryResponse = {
-      year: 2026,
-      month: 2,
-      actors: [{ actor_id: ACTOR_A, actor_name: "공동" }],
-      categories: [],
-    };
-    render(<ActorDonut data={buildActorSlices(data, ACTOR_A)} income={5741025} />);
-    const header = screen.getByTestId("donut-income");
-    expect(header.textContent).toContain("수입");
-    expect(header.textContent).toContain("5,741,025");
+  it("수입이 있으면 수입 도넛(차트 + 가운데 '수입 ₩X')을 렌더한다", () => {
+    const incomeData = buildActorIncomeSlices(makeIncomeOne(ACTOR_A, "5741025"), ACTOR_A);
+    render(<ActorDonut expense={EMPTY_DONUT} income={incomeData} />);
+    expect(screen.getByTestId("donut-income-chart")).toBeTruthy();
+    const center = screen.getByTestId("donut-income-center");
+    expect(center.textContent).toContain("수입");
+    expect(center.textContent).toContain("5,741,025");
   });
 
-  it("수입 = 0 일 때 수입 헤더 행은 미렌더", () => {
+  it("수입 = 0 일 때 수입 도넛 영역 미렌더", () => {
     const data: SummaryResponse = {
       year: 2026,
       month: 2,
@@ -162,11 +170,11 @@ describe("ActorDonut", () => {
         },
       ],
     };
-    render(<ActorDonut data={buildActorSlices(data, ACTOR_A)} income={0} />);
-    expect(screen.queryByTestId("donut-income")).toBeNull();
+    render(<ActorDonut expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
+    expect(screen.queryByTestId("donut-income-chart")).toBeNull();
   });
 
-  it("중앙 라벨이 '지출' + 합계를 표시한다", () => {
+  it("지출 중앙 라벨이 '지출' + 합계", () => {
     const data: SummaryResponse = {
       year: 2026,
       month: 2,
@@ -181,14 +189,13 @@ describe("ActorDonut", () => {
         },
       ],
     };
-    render(<ActorDonut data={buildActorSlices(data, ACTOR_A)} income={0} />);
+    render(<ActorDonut expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
     const center = screen.getByTestId("donut-center");
     expect(center.textContent).toContain("지출");
     expect(center.textContent).toContain("100,000");
   });
 
-  it("퍼센티지 분모는 Σ|value| (100% 수렴)", () => {
-    // 두 슬라이스 1000 + 3000 → 25% / 75%
+  it("지출 범례 % 분모는 Σ|value|", () => {
     const data: SummaryResponse = {
       year: 2026,
       month: 2,
@@ -210,22 +217,24 @@ describe("ActorDonut", () => {
         },
       ],
     };
-    render(<ActorDonut data={buildActorSlices(data, ACTOR_A)} income={0} />);
+    render(<ActorDonut expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
     expect(screen.getByText(/병원/).parentElement?.parentElement?.textContent).toContain("75.0%");
     expect(screen.getByText(/외식/).parentElement?.parentElement?.textContent).toContain("25.0%");
   });
 
-  it("수입 > 0 + 슬라이스 0 인 액터는 placeholder 텍스트 + 헤더만", () => {
-    const data: SummaryResponse = {
-      year: 2026,
-      month: 2,
-      actors: [{ actor_id: ACTOR_A, actor_name: "공동" }],
-      categories: [],
-    };
-    render(<ActorDonut data={buildActorSlices(data, ACTOR_A)} income={1000} />);
-    expect(screen.getByTestId("donut-income")).toBeTruthy();
+  it("수입은 있고 지출 슬라이스 0 → 수입 도넛 + '지출 없음' 텍스트", () => {
+    const incomeData = buildActorIncomeSlices(makeIncomeOne(ACTOR_A, "1000"), ACTOR_A);
+    render(<ActorDonut expense={EMPTY_DONUT} income={incomeData} />);
+    expect(screen.getByTestId("donut-income-chart")).toBeTruthy();
     expect(screen.getByTestId("donut-no-expense")).toBeTruthy();
     expect(screen.queryByTestId("donut-empty")).toBeNull();
+  });
+
+  it("수입 도넛에 카테고리 범례(%)가 노출되지 않는다", () => {
+    const incomeData = buildActorIncomeSlices(makeIncomeOne(ACTOR_A, "5000000"), ACTOR_A);
+    render(<ActorDonut expense={EMPTY_DONUT} income={incomeData} />);
+    // 수입 도넛 영역 안에 "급여" 카테고리명이 텍스트로 노출되면 안 됨
+    expect(screen.queryByText(/급여/)).toBeNull();
   });
 });
 

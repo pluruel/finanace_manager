@@ -5,8 +5,8 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import type { ActorDonutData, DonutSlice } from "@/lib/donut-data";
 
 type Props = {
-  data: ActorDonutData;
-  income: number;
+  expense: ActorDonutData;
+  income: ActorDonutData;
 };
 
 function fmtSigned(v: number): string {
@@ -14,17 +14,64 @@ function fmtSigned(v: number): string {
   return v < 0 ? `-₩${abs}` : `₩${abs}`;
 }
 
-export function ActorDonut({ data, income }: Props) {
-  const { actorName, total, slices } = data;
-  const expenseDenom = slices.reduce((acc, s) => acc + Math.abs(s.value), 0);
-  const hasIncome = income > 0;
-  const hasSlices = slices.length > 0;
-  const hasNothing = !hasIncome && !hasSlices;
+function DonutChart({
+  slices,
+  testIdPrefix,
+  centerLabel,
+  centerValue,
+}: {
+  slices: DonutSlice[];
+  testIdPrefix: "income" | "expense";
+  centerLabel: string;
+  centerValue: number;
+}) {
+  const centerTestId = testIdPrefix === "expense" ? "donut-center" : "donut-income-center";
+  return (
+    <div className="relative h-44" data-testid={`donut-${testIdPrefix}-chart`}>
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={slices.map((s) => ({ ...s, value: Math.abs(s.value) }))}
+            dataKey="value"
+            nameKey="name"
+            innerRadius={48}
+            outerRadius={72}
+            paddingAngle={1}
+            stroke="none"
+          >
+            {slices.map((s) => (
+              <Cell key={s.name} fill={s.color} />
+            ))}
+          </Pie>
+          <Tooltip
+            formatter={(v: number) => `₩${v.toLocaleString("ko-KR")}`}
+            contentStyle={{ fontSize: 12 }}
+          />
+        </PieChart>
+      </ResponsiveContainer>
+      <div
+        data-testid={centerTestId}
+        className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center"
+      >
+        <span className="text-xs text-muted-foreground">{centerLabel}</span>
+        <span className="text-base font-semibold tabular-nums">
+          {fmtSigned(centerValue)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function ActorDonut({ expense, income }: Props) {
+  const expenseDenom = expense.slices.reduce((acc, s) => acc + Math.abs(s.value), 0);
+  const hasIncome = income.slices.length > 0;
+  const hasExpense = expense.slices.length > 0;
+  const hasNothing = !hasIncome && !hasExpense;
 
   return (
-    <Card data-testid={`actor-donut-${actorName}`}>
+    <Card data-testid={`actor-donut-${expense.actorName}`}>
       <CardHeader>
-        <CardTitle className="text-base">{actorName}</CardTitle>
+        <CardTitle className="text-base">{expense.actorName}</CardTitle>
       </CardHeader>
       <CardContent>
         {hasNothing ? (
@@ -34,53 +81,24 @@ export function ActorDonut({ data, income }: Props) {
         ) : (
           <div className="flex flex-col gap-3">
             {hasIncome && (
-              <div
-                data-testid="donut-income"
-                className="flex items-center justify-between text-sm"
-              >
-                <span className="font-medium">수입</span>
-                <span className="font-mono font-semibold tabular-nums">
-                  {fmtSigned(income)}
-                </span>
-              </div>
+              <DonutChart
+                slices={income.slices}
+                testIdPrefix="income"
+                centerLabel="수입"
+                centerValue={income.total}
+              />
             )}
 
-            {hasSlices ? (
+            {hasExpense ? (
               <>
-                <div className="relative h-44">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={slices.map((s) => ({ ...s, value: Math.abs(s.value) }))}
-                        dataKey="value"
-                        nameKey="name"
-                        innerRadius={48}
-                        outerRadius={72}
-                        paddingAngle={1}
-                        stroke="none"
-                      >
-                        {slices.map((s) => (
-                          <Cell key={s.name} fill={s.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip
-                        formatter={(v: number) => `₩${v.toLocaleString("ko-KR")}`}
-                        contentStyle={{ fontSize: 12 }}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div
-                    data-testid="donut-center"
-                    className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center"
-                  >
-                    <span className="text-xs text-muted-foreground">지출</span>
-                    <span className="text-base font-semibold tabular-nums">
-                      {fmtSigned(total)}
-                    </span>
-                  </div>
-                </div>
+                <DonutChart
+                  slices={expense.slices}
+                  testIdPrefix="expense"
+                  centerLabel="지출"
+                  centerValue={expense.total}
+                />
                 <ul className="text-sm space-y-1">
-                  {slices.map((s: DonutSlice, i) => (
+                  {expense.slices.map((s: DonutSlice, i) => (
                     <li
                       key={`${s.name}-${i}`}
                       className="flex items-center justify-between gap-2"
