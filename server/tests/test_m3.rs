@@ -317,6 +317,9 @@ async fn merchant_stats_memo_less_only_total_matches_golden(pool: PgPool) {
     // The endpoint requires a merchant_id, so it can only surface memo-less
     // rows whose merchant_id is non-null. Anchor the per-merchant sum against
     // the same scope.
+    // Endpoint also filters by categories.kind='expense' (income rows like 급여/회수
+    // are excluded from merchant stats), so the anchor must mirror that filter or
+    // drift the moment the heuristic flags any merchant-attributed row as income.
     let direct: i64 = sqlx::query_scalar!(
         r#"SELECT COUNT(*) AS "n!: i64"
            FROM transactions t
