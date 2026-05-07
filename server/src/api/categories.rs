@@ -1,5 +1,5 @@
-use axum::{extract::State, Json};
-use serde::Serialize;
+use axum::{extract::{Path, State}, http::StatusCode, Json};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -144,5 +144,64 @@ pub async fn handle_get_payment_methods(
         .collect();
 
     Ok(Json(items))
+}
+
+// ── PATCH /api/categories/:id/kind ───────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PatchCategoryKindBody {
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PatchCategoryKindResponse {
+    pub id: Uuid,
+    pub kind: String,
+}
+
+/// PATCH /api/categories/:id/kind — toggle income/expense classification.
+/// `차감` 카테고리는 시스템 보호 카테고리이므로 변경 불가.
+pub async fn handle_patch_category_kind(
+    State(pool): State<Arc<PgPool>>,
+    ExtractUser(user): ExtractUser,
+    Path(category_id): Path<Uuid>,
+    Json(body): Json<PatchCategoryKindBody>,
+) -> Result<Json<PatchCategoryKindResponse>, (StatusCode, String)> {
+    let owner_id = user.sub;
+
+    if body.kind != "income" && body.kind != "expense" {
+        return Err((StatusCode::BAD_REQUEST, "kind must be 'income' or 'expense'".into()));
+    }
+
+    let row = sqlx::query!(
+        r#"SELECT name AS "name!: String" FROM categories WHERE id = $1 AND owner_id = $2"#,
+        category_id,
+        owner_id
+    )
+    .fetch_optional(&*pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let Some(found) = row else {
+        return Err((StatusCode::NOT_FOUND, "category not found".into()));
+    };
+    if found.name == "차감" {
+        return Err((StatusCode::CONFLICT, "차감 is a protected category".into()));
+    }
+
+    sqlx::query!(
+        r#"UPDATE categories SET kind = $1 WHERE id = $2 AND owner_id = $3"#,
+        body.kind,
+        category_id,
+        owner_id
+    )
+    .execute(&*pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(PatchCategoryKindResponse {
+        id: category_id,
+        kind: body.kind,
+    }))
 }
 

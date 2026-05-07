@@ -13,7 +13,7 @@ pub mod transactions;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use sqlx::PgPool;
@@ -53,6 +53,10 @@ pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
             post(aliases::handle_confirm_entity),
         )
         .route("/api/categories", get(categories::handle_get_categories))
+        .route(
+            "/api/categories/:id/kind",
+            patch(categories::handle_patch_category_kind),
+        )
         .route("/api/merchants", get(categories::handle_get_merchants))
         .route("/api/payment-methods", get(categories::handle_get_payment_methods))
         .with_state(pool.clone())
