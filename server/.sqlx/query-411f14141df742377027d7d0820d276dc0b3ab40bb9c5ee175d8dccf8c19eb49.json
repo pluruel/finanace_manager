@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '외식', 'income')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "411f14141df742377027d7d0820d276dc0b3ab40bb9c5ee175d8dccf8c19eb49"
+}
