@@ -184,6 +184,7 @@ describe("incomeFor", () => {
       { actor_id: ACTOR_B, actor_name: "엉아", total: "1000" },
     ],
     total: "1000",
+    categories: [],
   };
 
   it("'household' 키워드는 전체 합계를 반환한다", () => {
