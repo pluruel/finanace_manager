@@ -51,7 +51,6 @@ function makeItem(overrides: Partial<TransactionItem> = {}): TransactionItem {
     payment_method_id: null,
     payment_method_name: null,
     amount: "10000.00",
-    sign: 1,
     unit_price: null,
     quantity: null,
     memo: null,
@@ -124,7 +123,6 @@ describe("buildTableData", () => {
     const deduction = makeItem({
       id: "ddd00000-0000-0000-0000-000000000001",
       category_name: "차감",
-      sign: 1,
     });
 
     const rows = buildTableData([single1, multi, deduction]);

@@ -165,20 +165,21 @@ const columns = [
   }),
 
   col.accessor(
-    (row) => ({ amount: row.item.amount, sign: row.item.sign }),
+    (row) => row.item.amount,
     {
       id: "amount",
       header: "금액",
       cell: ({ getValue }) => {
-        const { amount, sign } = getValue<{ amount: string; sign: number }>();
+        const amount = getValue<string>();
+        const isCashIn = parseFloat(amount) > 0;
         return (
           <span
             className={cn(
               "text-sm font-medium tabular-nums text-right",
-              sign === -1 ? "text-blue-600" : "text-foreground",
+              isCashIn ? "text-blue-600" : "text-foreground",
             )}
           >
-            {formatAmount(amount, sign)}
+            {formatAmount(amount)}
           </span>
         );
       },

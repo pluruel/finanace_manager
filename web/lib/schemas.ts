@@ -24,8 +24,7 @@ export type TransactionItem = {
   product_name: string | null;
   payment_method_id: string | null;
   payment_method_name: string | null;
-  amount: string; // Decimal → string
-  sign: number; // i16 (-1 | 1)
+  amount: string; // Decimal → string (signed cash-flow value)
   unit_price: string | null;
   quantity: string | null;
   memo: string | null;
@@ -50,7 +49,6 @@ export const TransactionItemSchema: z.ZodType<TransactionItem, z.ZodTypeDef, unk
     payment_method_id: z.string().uuid().nullable(),
     payment_method_name: z.string().nullable(),
     amount: DecimalSchema,
-    sign: z.number().int(),
     unit_price: DecimalSchema.nullable(),
     quantity: DecimalSchema.nullable(),
     memo: z.string().nullable(),
@@ -124,7 +122,6 @@ export const ByActorEntrySchema = z.object({
   actor_id: z.string().uuid().nullable(),
   actor_name: z.string(),
   amount: DecimalSchema,
-  sign: z.number().int(),
 });
 
 export type ByActorEntry = z.infer<typeof ByActorEntrySchema>;

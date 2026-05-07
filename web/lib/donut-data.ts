@@ -30,12 +30,6 @@ const TOP_N = 6;
 const DEDUCTION_NAME = "차감";
 const OTHER_NAME = "기타";
 
-function signedNumber(amount: string, sign: number): number {
-  const v = parseFloat(amount);
-  if (Number.isNaN(v)) return 0;
-  return sign < 0 ? -v : v;
-}
-
 function actorNameFor(data: SummaryResponse, actorId: string | null): string {
   const fromActors = data.actors.find((a) => a.actor_id === actorId);
   if (fromActors) return fromActors.actor_name;
@@ -58,7 +52,8 @@ export function buildActorSlices(
   for (const cat of data.categories) {
     const cell = cat.by_actor.find((e) => e.actor_id === actorId);
     if (!cell) continue;
-    const v = signedNumber(cell.amount, cell.sign);
+    const v = parseFloat(cell.amount);
+    if (Number.isNaN(v)) continue;
     if (v === 0) continue;
     raws.push({
       name: cat.category_name,

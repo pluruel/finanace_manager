@@ -6,7 +6,7 @@ const ACTOR_A = "00000000-0000-0000-0000-0000000000aa";
 const ACTOR_B = "00000000-0000-0000-0000-0000000000bb";
 
 function makeData(
-  categories: Array<{ name: string; cells: Array<{ actor: string; amount: string; sign?: number }> }>,
+  categories: Array<{ name: string; cells: Array<{ actor: string; amount: string }> }>,
 ): SummaryResponse {
   return {
     year: 2026,
@@ -23,7 +23,6 @@ function makeData(
         actor_id: cell.actor,
         actor_name: cell.actor === ACTOR_A ? "공동" : "엉아",
         amount: cell.amount,
-        sign: cell.sign ?? 1,
       })),
       total: "0",
     })),
@@ -122,14 +121,12 @@ describe("buildActorSlices", () => {
     expect(result.total).toBe(1200);
   });
 
-  it("respects sign=-1 (refund / negative line) when summing", () => {
+  it("환불(음수 amount)이 같은 actor 합계를 깎는다", () => {
     const data = makeData([
-      { name: "외식", cells: [{ actor: ACTOR_A, amount: "1000", sign: 1 }] },
-      { name: "환불", cells: [{ actor: ACTOR_A, amount: "300", sign: -1 }] },
+      { name: "외식", cells: [{ actor: ACTOR_A, amount: "1000" }] },
+      { name: "환불 라인", cells: [{ actor: ACTOR_A, amount: "-300" }] },
     ]);
     const result = buildActorSlices(data, ACTOR_A);
-    expect(result.slices.map((s) => s.name)).toEqual(["외식", "환불"]);
-    expect(result.slices[1].value).toBe(-300);
     expect(result.total).toBe(700);
   });
 
@@ -143,7 +140,7 @@ describe("buildActorSlices", () => {
           category_id: "11111111-1111-1111-1111-111111111111",
           category_name: "외식",
           kind: "expense",
-          by_actor: [{ actor_id: null, actor_name: "미지정", amount: "100", sign: 1 }],
+          by_actor: [{ actor_id: null, actor_name: "미지정", amount: "100" }],
           total: "100",
         },
       ],
@@ -177,8 +174,8 @@ describe("collectOrderedActorIds", () => {
           category_name: "외식",
           kind: "expense",
           by_actor: [
-            { actor_id: B, actor_name: "엉아", amount: "100", sign: 1 },
-            { actor_id: A, actor_name: "공동", amount: "200", sign: 1 },
+            { actor_id: B, actor_name: "엉아", amount: "100" },
+            { actor_id: A, actor_name: "공동", amount: "200" },
           ],
           total: "300",
         },
@@ -198,9 +195,9 @@ describe("collectOrderedActorIds", () => {
           category_name: "외식",
           kind: "expense",
           by_actor: [
-            { actor_id: A, actor_name: "공동", amount: "100", sign: 1 },
-            { actor_id: null, actor_name: "미지정", amount: "50", sign: 1 },
-            { actor_id: C, actor_name: "신규", amount: "30", sign: 1 },
+            { actor_id: A, actor_name: "공동", amount: "100" },
+            { actor_id: null, actor_name: "미지정", amount: "50" },
+            { actor_id: C, actor_name: "신규", amount: "30" },
           ],
           total: "180",
         },
@@ -219,7 +216,7 @@ describe("collectOrderedActorIds", () => {
           category_id: "11111111-1111-1111-1111-111111111111",
           category_name: "외식",
           kind: "expense",
-          by_actor: [{ actor_id: null, actor_name: "미지정", amount: "10", sign: 1 }],
+          by_actor: [{ actor_id: null, actor_name: "미지정", amount: "10" }],
           total: "10",
         },
         {
@@ -227,8 +224,8 @@ describe("collectOrderedActorIds", () => {
           category_name: "쇼핑",
           kind: "expense",
           by_actor: [
-            { actor_id: null, actor_name: "미지정", amount: "20", sign: 1 },
-            { actor_id: A, actor_name: "공동", amount: "30", sign: 1 },
+            { actor_id: null, actor_name: "미지정", amount: "20" },
+            { actor_id: A, actor_name: "공동", amount: "30" },
           ],
           total: "50",
         },
