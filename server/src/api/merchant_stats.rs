@@ -28,7 +28,7 @@ pub struct MerchantStatsQuery {
 pub struct MonthlyMerchantPoint {
     /// First-of-month date.
     pub month: NaiveDate,
-    /// Sum of (amount * sign) for the (merchant, month) cell.
+    /// `-SUM(t.amount)` over expense rows for the (merchant, month) cell — positive expense magnitude.
     pub total: Decimal,
     /// Count of transactions in the cell.
     pub transaction_count: i64,

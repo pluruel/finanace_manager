@@ -536,9 +536,9 @@ pub async fn run_pipeline(
             None
         };
 
-        // 4. amount 계산 — 엑셀 부호를 반전해서 캐시플로우 부호로 저장.
-        //    기존 sign 컬럼은 폐기. 환불(엑셀 음수)은 저장 시 양수가 되어
-        //    같은 expense 카테고리 안에서 자연 차감.
+        // 4. amount 계산 — Excel 은 지출 장부 부호 (지출 양수, 환불 음수).
+        //    DB 는 캐시플로우 부호 (유입 양수, 유출 음수). 그래서 부호 반전.
+        //    환불은 저장 후 양수가 되어 같은 expense 카테고리 안에서 자연 차감.
         let raw_amount = match row.line_amount.or(row.total_amount) {
             Some(a) => a,
             None => {
