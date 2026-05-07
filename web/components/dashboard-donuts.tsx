@@ -28,11 +28,16 @@ function EmptyDonutsCard() {
 
 export function DashboardDonuts({ data }: Props) {
   const ordered = collectOrderedActorIds(data);
-  const donuts = data
-    ? ordered
-        .map((actorId) => buildActorSlices(data, actorId))
-        .filter((d) => d.slices.length > 0)
-    : [];
+  const knownActorIds = new Set<string | null>(
+    data?.actors.map((a) => a.actor_id) ?? [],
+  );
+  const allDonuts = data ? ordered.map((actorId) => buildActorSlices(data, actorId)) : [];
+  // Keep cards for any actor declared in data.actors (even if empty, to preserve
+  // the stable 3-column grid). Drop only stray actor_ids that came in via
+  // by_actor cells but produced no slices.
+  const donuts = allDonuts.filter(
+    (d) => knownActorIds.has(d.actorId) || d.slices.length > 0,
+  );
 
   if (donuts.length === 0) return <EmptyDonutsCard />;
 
