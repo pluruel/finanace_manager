@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO transactions_raw\n               (owner_id, import_batch_id, row_index, group_id, is_group_header)\n               VALUES ($1, $2, $3, $4, true) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f10c5e1200be510f5cba839ec4c5e9d18a881744666e792d0a0f35db33c9a713"
+}

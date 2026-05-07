@@ -183,6 +183,174 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
     assert_eq!(baby_total, rust_decimal::Decimal::ZERO, "아기 should have zero income");
 }
 
+/// `categories` 필드는 income kind 카테고리만 포함하고 액터 셀 합계가 양수.
+#[sqlx::test(migrations = "./migrations")]
+async fn income_response_includes_categories_breakdown(pool: PgPool) {
+    let owner_id = Uuid::new_v4();
+    let pool = Arc::new(pool);
+
+    let actor_eonga: Uuid = sqlx::query_scalar!(
+        "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    let salary_cat: Uuid = sqlx::query_scalar!(
+        "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    let batch_id: Uuid = sqlx::query_scalar!(
+        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
+           VALUES ($1, 'cat.xlsx', '\x02'::bytea, 2026, 2, 1)
+           RETURNING id"#,
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    let group_id = Uuid::new_v4();
+    let raw_id: Uuid = sqlx::query_scalar!(
+        r#"INSERT INTO transactions_raw
+           (owner_id, import_batch_id, row_index, group_id, is_group_header)
+           VALUES ($1, $2, 0, $3, true) RETURNING id"#,
+        owner_id, batch_id, group_id,
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    sqlx::query!(
+        r#"INSERT INTO transactions
+           (owner_id, raw_id, group_id, occurred_on, actor_id, category_id, amount)
+           VALUES ($1, $2, $3, '2026-02-25', $4, $5, 4500000)"#,
+        owner_id, raw_id, group_id, actor_eonga, salary_cat,
+    )
+    .execute(&*pool)
+    .await
+    .unwrap();
+
+    let app = build_test_router(pool, owner_id);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/summary/income/2026/2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let categories = body["categories"].as_array().expect("categories must be an array");
+    assert_eq!(categories.len(), 1, "only one income category expected");
+    assert_eq!(categories[0]["category_name"], "급여");
+    assert_eq!(categories[0]["kind"], "income");
+
+    let by_actor = categories[0]["by_actor"].as_array().unwrap();
+    assert_eq!(by_actor.len(), 1);
+    assert_eq!(by_actor[0]["actor_name"], "엉아");
+    let amt: rust_decimal::Decimal = by_actor[0]["amount"].as_str().unwrap().parse().unwrap();
+    assert_eq!(amt, "4500000".parse::<rust_decimal::Decimal>().unwrap(),
+               "income amount stays positive (no sign flip)");
+}
+
+/// expense kind 카테고리는 categories 에 절대 등장하지 않는다.
+#[sqlx::test(migrations = "./migrations")]
+async fn income_categories_exclude_expense_kind(pool: PgPool) {
+    let owner_id = Uuid::new_v4();
+    let pool = Arc::new(pool);
+
+    let actor: Uuid = sqlx::query_scalar!(
+        "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    let income_cat: Uuid = sqlx::query_scalar!(
+        "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    let expense_cat: Uuid = sqlx::query_scalar!(
+        "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    let batch_id: Uuid = sqlx::query_scalar!(
+        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
+           VALUES ($1, 'mix.xlsx', '\x03'::bytea, 2026, 2, 2)
+           RETURNING id"#,
+        owner_id
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap();
+
+    for (i, (cat, amount)) in [(income_cat, 1000000_i64), (expense_cat, -50000_i64)].iter().enumerate() {
+        let group_id = Uuid::new_v4();
+        let raw_id: Uuid = sqlx::query_scalar!(
+            r#"INSERT INTO transactions_raw
+               (owner_id, import_batch_id, row_index, group_id, is_group_header)
+               VALUES ($1, $2, $3, $4, true) RETURNING id"#,
+            owner_id, batch_id, i as i32, group_id,
+        )
+        .fetch_one(&*pool)
+        .await
+        .unwrap();
+
+        sqlx::query!(
+            r#"INSERT INTO transactions
+               (owner_id, raw_id, group_id, occurred_on, actor_id, category_id, amount)
+               VALUES ($1, $2, $3, '2026-02-15', $4, $5, $6)"#,
+            owner_id, raw_id, group_id, actor, cat, rust_decimal::Decimal::from(*amount),
+        )
+        .execute(&*pool)
+        .await
+        .unwrap();
+    }
+
+    let app = build_test_router(pool, owner_id);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/summary/income/2026/2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let categories = body["categories"].as_array().unwrap();
+    assert_eq!(categories.len(), 1, "only the income category should appear");
+    assert_eq!(categories[0]["category_name"], "급여");
+    assert_eq!(categories[0]["kind"], "income");
+    for c in categories {
+        assert_ne!(c["kind"], "expense", "expense kind must not leak into income response");
+    }
+}
+
 /// Expense-only transactions should not count towards income totals.
 #[sqlx::test(migrations = "./migrations")]
 async fn expense_transactions_excluded_from_income(pool: PgPool) {

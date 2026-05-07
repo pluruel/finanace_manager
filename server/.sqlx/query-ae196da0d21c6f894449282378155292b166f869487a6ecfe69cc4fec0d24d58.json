@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)\n           VALUES ($1, 'mix.xlsx', '\\x03'::bytea, 2026, 2, 2)\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ae196da0d21c6f894449282378155292b166f869487a6ecfe69cc4fec0d24d58"
+}
