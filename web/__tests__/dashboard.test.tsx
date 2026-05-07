@@ -142,13 +142,13 @@ describe("ActorDonut", () => {
   }
 
   it("수입/지출 모두 비면 빈 placeholder", () => {
-    render(<ActorDonut expense={EMPTY_DONUT} income={EMPTY_DONUT} />);
+    render(<ActorDonut actorName="공동" expense={EMPTY_DONUT} income={EMPTY_DONUT} />);
     expect(screen.getByTestId("donut-empty")).toBeTruthy();
   });
 
   it("수입이 있으면 수입 도넛(차트 + 가운데 '수입 ₩X')을 렌더한다", () => {
     const incomeData = buildActorIncomeSlices(makeIncomeOne(ACTOR_A, "5741025"), ACTOR_A);
-    render(<ActorDonut expense={EMPTY_DONUT} income={incomeData} />);
+    render(<ActorDonut actorName="공동" expense={EMPTY_DONUT} income={incomeData} />);
     expect(screen.getByTestId("donut-income-chart")).toBeTruthy();
     const center = screen.getByTestId("donut-income-center");
     expect(center.textContent).toContain("수입");
@@ -170,7 +170,7 @@ describe("ActorDonut", () => {
         },
       ],
     };
-    render(<ActorDonut expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
+    render(<ActorDonut actorName="공동" expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
     expect(screen.queryByTestId("donut-income-chart")).toBeNull();
   });
 
@@ -189,7 +189,7 @@ describe("ActorDonut", () => {
         },
       ],
     };
-    render(<ActorDonut expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
+    render(<ActorDonut actorName="공동" expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
     const center = screen.getByTestId("donut-center");
     expect(center.textContent).toContain("지출");
     expect(center.textContent).toContain("100,000");
@@ -217,24 +217,25 @@ describe("ActorDonut", () => {
         },
       ],
     };
-    render(<ActorDonut expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
+    render(<ActorDonut actorName="공동" expense={buildActorSlices(data, ACTOR_A)} income={EMPTY_DONUT} />);
     expect(screen.getByText(/병원/).parentElement?.parentElement?.textContent).toContain("75.0%");
     expect(screen.getByText(/외식/).parentElement?.parentElement?.textContent).toContain("25.0%");
   });
 
   it("수입은 있고 지출 슬라이스 0 → 수입 도넛 + '지출 없음' 텍스트", () => {
     const incomeData = buildActorIncomeSlices(makeIncomeOne(ACTOR_A, "1000"), ACTOR_A);
-    render(<ActorDonut expense={EMPTY_DONUT} income={incomeData} />);
+    render(<ActorDonut actorName="공동" expense={EMPTY_DONUT} income={incomeData} />);
     expect(screen.getByTestId("donut-income-chart")).toBeTruthy();
     expect(screen.getByTestId("donut-no-expense")).toBeTruthy();
     expect(screen.queryByTestId("donut-empty")).toBeNull();
   });
 
-  it("수입 도넛에 카테고리 범례(%)가 노출되지 않는다", () => {
+  it("수입 도넛에 카테고리 범례 <ul> 가 렌더되지 않는다", () => {
     const incomeData = buildActorIncomeSlices(makeIncomeOne(ACTOR_A, "5000000"), ACTOR_A);
-    render(<ActorDonut expense={EMPTY_DONUT} income={incomeData} />);
-    // 수입 도넛 영역 안에 "급여" 카테고리명이 텍스트로 노출되면 안 됨
-    expect(screen.queryByText(/급여/)).toBeNull();
+    render(<ActorDonut actorName="공동" expense={EMPTY_DONUT} income={incomeData} />);
+    // expense 가 비어있으므로 카드 전체에 범례 <ul> 가 존재하면 안 됨
+    const stack = screen.getByTestId("donut-stack");
+    expect(stack.querySelector("ul")).toBeNull();
   });
 });
 

@@ -5,6 +5,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import type { ActorDonutData, DonutSlice } from "@/lib/donut-data";
 
 type Props = {
+  actorName: string;
   expense: ActorDonutData;
   income: ActorDonutData;
 };
@@ -16,18 +17,19 @@ function fmtSigned(v: number): string {
 
 function DonutChart({
   slices,
-  testIdPrefix,
+  chartTestId,
+  centerTestId,
   centerLabel,
   centerValue,
 }: {
   slices: DonutSlice[];
-  testIdPrefix: "income" | "expense";
+  chartTestId: string;
+  centerTestId: string;
   centerLabel: string;
   centerValue: number;
 }) {
-  const centerTestId = testIdPrefix === "expense" ? "donut-center" : "donut-income-center";
   return (
-    <div className="relative h-44" data-testid={`donut-${testIdPrefix}-chart`}>
+    <div className="relative h-44" data-testid={chartTestId}>
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Pie
@@ -62,16 +64,16 @@ function DonutChart({
   );
 }
 
-export function ActorDonut({ expense, income }: Props) {
+export function ActorDonut({ actorName, expense, income }: Props) {
   const expenseDenom = expense.slices.reduce((acc, s) => acc + Math.abs(s.value), 0);
   const hasIncome = income.slices.length > 0;
   const hasExpense = expense.slices.length > 0;
   const hasNothing = !hasIncome && !hasExpense;
 
   return (
-    <Card data-testid={`actor-donut-${expense.actorName}`}>
+    <Card data-testid={`actor-donut-${actorName}`}>
       <CardHeader>
-        <CardTitle className="text-base">{expense.actorName}</CardTitle>
+        <CardTitle className="text-base">{actorName}</CardTitle>
       </CardHeader>
       <CardContent>
         {hasNothing ? (
@@ -79,11 +81,12 @@ export function ActorDonut({ expense, income }: Props) {
             이 달의 거래 내역이 없습니다.
           </p>
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-3" data-testid="donut-stack">
             {hasIncome && (
               <DonutChart
                 slices={income.slices}
-                testIdPrefix="income"
+                chartTestId="donut-income-chart"
+                centerTestId="donut-income-center"
                 centerLabel="수입"
                 centerValue={income.total}
               />
@@ -93,7 +96,8 @@ export function ActorDonut({ expense, income }: Props) {
               <>
                 <DonutChart
                   slices={expense.slices}
-                  testIdPrefix="expense"
+                  chartTestId="donut-expense-chart"
+                  centerTestId="donut-center"
                   centerLabel="지출"
                   centerValue={expense.total}
                 />
