@@ -253,6 +253,18 @@ describe("DashboardDonuts (가구합계 / 아기 / 엉아 3장)", () => {
         { actor_id: SPOUSE, actor_name: "엉아", total: "6475664" },
       ],
       total: "12216689",
+      categories: [
+        {
+          category_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+          category_name: "급여",
+          kind: "income",
+          by_actor: [
+            { actor_id: BABY, actor_name: "아기", amount: "5741025" },
+            { actor_id: SPOUSE, actor_name: "엉아", amount: "6475664" },
+          ],
+          total: "12216689",
+        },
+      ],
     };
   }
 
@@ -289,37 +301,46 @@ describe("DashboardDonuts (가구합계 / 아기 / 엉아 3장)", () => {
   it("3장의 카드를 고정 순서 가구합계 / 아기 / 엉아 로 렌더한다", () => {
     render(<DashboardDonuts summary={makeSummary()} income={makeIncome()} />);
     const cards = screen.getAllByTestId(/^actor-donut-/);
-    // 첫 카드는 가구 합계, 다음은 아기, 다음은 엉아
     expect(cards[0].getAttribute("data-testid")).toBe("actor-donut-가구 합계");
     expect(cards[1].getAttribute("data-testid")).toBe("actor-donut-아기");
     expect(cards[2].getAttribute("data-testid")).toBe("actor-donut-엉아");
   });
 
-  it("가구 합계 카드의 income 헤더는 income.total 을 사용한다", () => {
+  it("가구 합계 카드의 수입 도넛 중앙 라벨에 합계가 표시된다", () => {
     render(<DashboardDonuts summary={makeSummary()} income={makeIncome()} />);
     const householdCard = screen.getByTestId("actor-donut-가구 합계");
-    expect(householdCard.textContent).toContain("12,216,689");
+    const center = householdCard.querySelector('[data-testid="donut-income-center"]');
+    expect(center?.textContent).toContain("12,216,689");
   });
 
-  it("아기 카드의 income 헤더는 by_actor 매치 값", () => {
+  it("아기 카드의 수입 도넛 중앙 라벨에 by_actor 매치 값", () => {
     render(<DashboardDonuts summary={makeSummary()} income={makeIncome()} />);
     const babyCard = screen.getByTestId("actor-donut-아기");
-    expect(babyCard.textContent).toContain("5,741,025");
+    const center = babyCard.querySelector('[data-testid="donut-income-center"]');
+    expect(center?.textContent).toContain("5,741,025");
   });
 
-  it("income 0 인 아기 카드는 수입 헤더 미렌더", () => {
-    const income: IncomeResponse = {
+  it("아기 카드 income 카테고리 셀이 없으면 수입 도넛 미렌더", () => {
+    const noBabyIncome: IncomeResponse = {
       month: "2026-02",
       by_actor: [
         { actor_id: BABY, actor_name: "아기", total: "0" },
         { actor_id: SPOUSE, actor_name: "엉아", total: "1000" },
       ],
       total: "1000",
+      categories: [
+        {
+          category_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+          category_name: "급여",
+          kind: "income",
+          by_actor: [{ actor_id: SPOUSE, actor_name: "엉아", amount: "1000" }],
+          total: "1000",
+        },
+      ],
     };
-    render(<DashboardDonuts summary={makeSummary()} income={income} />);
-    const babyCard = screen.getByTestId("actor-donut-아기");
-    // 수입 헤더 testid 는 카드 내부에 없어야 함
-    expect(babyCard.querySelector('[data-testid="donut-income"]')).toBeNull();
+    const { container } = render(<DashboardDonuts summary={makeSummary()} income={noBabyIncome} />);
+    const babyCard = container.querySelector('[data-testid="actor-donut-아기"]')!;
+    expect(babyCard.querySelector('[data-testid="donut-income-chart"]')).toBeNull();
   });
 });
 
