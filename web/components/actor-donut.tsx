@@ -15,14 +15,9 @@ function fmtSigned(v: number): string {
   return v < 0 ? `-₩${abs}` : `₩${abs}`;
 }
 
-function pctOfAbs(value: number, slices: DonutSlice[]): string {
-  const denom = slices.reduce((acc, s) => acc + Math.abs(s.value), 0);
-  if (denom === 0) return "0%";
-  return `${((Math.abs(value) / denom) * 100).toFixed(1)}%`;
-}
-
 export function ActorDonut({ data, income }: Props) {
   const { actorName, total, slices } = data;
+  const expenseDenom = slices.reduce((acc, s) => acc + Math.abs(s.value), 0);
   const hasIncome = income > 0;
   const hasSlices = slices.length > 0;
   const hasNothing = !hasIncome && !hasSlices;
@@ -43,14 +38,10 @@ export function ActorDonut({ data, income }: Props) {
               <div
                 data-testid="actor-donut-income"
                 className="flex items-center justify-between text-sm"
+                style={{ color: INCOME_COLOR }}
               >
-                <span className="font-medium" style={{ color: INCOME_COLOR }}>
-                  수입
-                </span>
-                <span
-                  className="font-mono font-semibold tabular-nums"
-                  style={{ color: INCOME_COLOR }}
-                >
+                <span className="font-medium">수입</span>
+                <span className="font-mono font-semibold tabular-nums">
                   {fmtSigned(income)}
                 </span>
               </div>
@@ -105,7 +96,7 @@ export function ActorDonut({ data, income }: Props) {
                         <span className="truncate">{s.name}</span>
                       </span>
                       <span className="tabular-nums text-muted-foreground shrink-0">
-                        {fmtSigned(s.value)} · {pctOfAbs(s.value, slices)}
+                        {fmtSigned(s.value)} · {expenseDenom === 0 ? "0%" : `${((Math.abs(s.value) / expenseDenom) * 100).toFixed(1)}%`}
                       </span>
                     </li>
                   ))}
