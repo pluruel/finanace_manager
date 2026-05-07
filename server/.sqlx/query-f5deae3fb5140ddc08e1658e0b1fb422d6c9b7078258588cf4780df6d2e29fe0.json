@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)\n           VALUES ($1, 'payment_method', '롯데A', $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f5deae3fb5140ddc08e1658e0b1fb422d6c9b7078258588cf4780df6d2e29fe0"
+}

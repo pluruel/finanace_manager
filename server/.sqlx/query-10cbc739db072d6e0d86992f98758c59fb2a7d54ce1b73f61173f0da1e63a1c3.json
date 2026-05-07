@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO transactions (\n            owner_id, raw_id, group_id, occurred_on,\n            merchant_id, actor_id, category_id, product_id, payment_method_id,\n            amount, sign, unit_price, quantity, memo\n        ) VALUES (\n            $1, $2, $3, $4,\n            $5, $6, $7, $8, $9,\n            $10, $11, $12, $13, $14\n        ) RETURNING id",
+  "query": "INSERT INTO transactions (\n            owner_id, raw_id, group_id, occurred_on,\n            merchant_id, actor_id, category_id, product_id, payment_method_id,\n            amount, unit_price, quantity, memo\n        ) VALUES (\n            $1, $2, $3, $4,\n            $5, $6, $7, $8, $9,\n            $10, $11, $12, $13\n        ) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -21,7 +21,6 @@
         "Uuid",
         "Uuid",
         "Numeric",
-        "Int2",
         "Numeric",
         "Numeric",
         "Text"
@@ -31,5 +30,5 @@
       false
     ]
   },
-  "hash": "92e627daf8eb0f5f1cc6f6dd7c80588815262399787c752de6d569dfbf0186b2"
+  "hash": "10cbc739db072d6e0d86992f98758c59fb2a7d54ce1b73f61173f0da1e63a1c3"
 }

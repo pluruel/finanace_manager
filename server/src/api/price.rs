@@ -89,7 +89,6 @@ pub async fn handle_get_price_history(
             t.unit_price   AS "unit_price!: Decimal",
             t.quantity     AS "quantity?: Decimal",
             t.amount       AS "amount!: Decimal",
-            t.sign         AS "sign!: i16",
             t.merchant_id  AS "merchant_id?: Uuid",
             m.name         AS "merchant_name?: String",
             t.memo
@@ -117,7 +116,7 @@ pub async fn handle_get_price_history(
             occurred_on: r.occurred_on,
             unit_price: r.unit_price,
             quantity: r.quantity,
-            line_amount: r.amount * Decimal::from(r.sign),
+            line_amount: -r.amount,
             merchant_id: r.merchant_id,
             merchant_name: r.merchant_name,
             memo: r.memo,

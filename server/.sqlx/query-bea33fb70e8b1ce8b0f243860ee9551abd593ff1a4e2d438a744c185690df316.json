@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*)::bigint\n        FROM (\n            SELECT\n                g.group_id,\n                g.header_total,\n                COALESCE(-SUM(t.amount), 0) AS lines_sum\n            FROM (\n                SELECT group_id, total_amount AS header_total\n                FROM transactions_raw\n                WHERE is_group_header = true\n                  AND owner_id = $1\n                  AND import_batch_id = $2\n            ) g\n            LEFT JOIN transactions t ON t.group_id = g.group_id AND t.owner_id = $1\n            GROUP BY g.group_id, g.header_total\n            HAVING g.header_total <> COALESCE(-SUM(t.amount), 0)\n        ) violations\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "bea33fb70e8b1ce8b0f243860ee9551abd593ff1a4e2d438a744c185690df316"
+}

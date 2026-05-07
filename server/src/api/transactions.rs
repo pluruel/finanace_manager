@@ -41,7 +41,6 @@ pub struct TransactionItem {
     pub payment_method_id: Option<Uuid>,
     pub payment_method_name: Option<String>,
     pub amount: Decimal,
-    pub sign: i16,
     pub unit_price: Option<Decimal>,
     pub quantity: Option<Decimal>,
     pub memo: Option<String>,
@@ -83,7 +82,6 @@ pub async fn handle_get_transactions(
             t.payment_method_id AS "payment_method_id?: Uuid",
             pm.name        AS "payment_method_name?: String",
             t.amount       AS "amount!: Decimal",
-            t.sign         AS "sign!: i16",
             t.unit_price   AS "unit_price?: Decimal",
             t.quantity     AS "quantity?: Decimal",
             t.memo
@@ -137,7 +135,6 @@ pub async fn handle_get_transactions(
             payment_method_id: row.payment_method_id,
             payment_method_name: row.payment_method_name,
             amount: row.amount,
-            sign: row.sign,
             unit_price: row.unit_price,
             quantity: row.quantity,
             memo: row.memo,

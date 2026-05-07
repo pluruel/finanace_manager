@@ -1,0 +1,84 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            t.occurred_on  AS \"occurred_on!: NaiveDate\",\n            m.name         AS \"merchant?: String\",\n            a.name         AS \"actor?: String\",\n            c.name         AS \"category?: String\",\n            c.kind         AS \"kind?: String\",\n            pm.name        AS \"payment_method?: String\",\n            t.amount       AS \"amount!: Decimal\",\n            t.unit_price   AS \"unit_price?: Decimal\",\n            t.quantity     AS \"quantity?: Decimal\",\n            t.memo         AS \"memo?: String\",\n            t.group_id     AS \"group_id!: Uuid\"\n        FROM transactions t\n        LEFT JOIN merchants m        ON m.id  = t.merchant_id        AND m.owner_id  = t.owner_id\n        LEFT JOIN ledger_actors a    ON a.id  = t.actor_id           AND a.owner_id  = t.owner_id\n        LEFT JOIN categories c       ON c.id  = t.category_id        AND c.owner_id  = t.owner_id\n        LEFT JOIN payment_methods pm ON pm.id = t.payment_method_id  AND pm.owner_id = t.owner_id\n        WHERE t.owner_id = $1\n          AND t.occurred_on >= make_date($2, $3, 1)\n          AND t.occurred_on  < make_date($2, $3, 1) + INTERVAL '1 month'\n        ORDER BY t.occurred_on, t.group_id, t.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "occurred_on!: NaiveDate",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 1,
+        "name": "merchant?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "actor?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "category?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "kind?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "payment_method?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "amount!: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 7,
+        "name": "unit_price?: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 8,
+        "name": "quantity?: Decimal",
+        "type_info": "Numeric"
+      },
+      {
+        "ordinal": 9,
+        "name": "memo?: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "group_id!: Uuid",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "4526c1a093e77c1d61222362c46a345abb861c6131fa5379f6f498ab0692436e"
+}

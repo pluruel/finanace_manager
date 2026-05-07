@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "review_state",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7dd6fce8725a91175350a2f185a3ca33bf98739f36bb5e366541c4d9b2528e2d"
+}

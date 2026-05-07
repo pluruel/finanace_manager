@@ -395,11 +395,11 @@ async fn insert_transaction(
         r#"INSERT INTO transactions (
             owner_id, raw_id, group_id, occurred_on,
             merchant_id, actor_id, category_id, product_id, payment_method_id,
-            amount, sign, unit_price, quantity, memo
+            amount, unit_price, quantity, memo
         ) VALUES (
             $1, $2, $3, $4,
             $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14
+            $10, $11, $12, $13
         ) RETURNING id"#,
         owner_id,
         t.raw_id,
@@ -411,7 +411,6 @@ async fn insert_transaction(
         t.product_id,
         t.payment_method_id,
         t.amount,
-        t.sign as i16,
         t.unit_price,
         t.quantity,
         t.memo,
@@ -433,7 +432,7 @@ pub async fn check_group_integrity(
         SELECT
             g.group_id,
             g.header_total,
-            COALESCE(SUM(t.amount * t.sign), 0) AS lines_sum
+            COALESCE(-SUM(t.amount), 0) AS lines_sum
         FROM (
             SELECT group_id, total_amount AS header_total
             FROM transactions_raw
@@ -443,7 +442,7 @@ pub async fn check_group_integrity(
         ) g
         LEFT JOIN transactions t ON t.group_id = g.group_id AND t.owner_id = $1
         GROUP BY g.group_id, g.header_total
-        HAVING g.header_total <> COALESCE(SUM(t.amount * t.sign), 0)
+        HAVING g.header_total <> COALESCE(-SUM(t.amount), 0)
         "#,
         owner_id,
         batch_id,
@@ -537,33 +536,17 @@ pub async fn run_pipeline(
             None
         };
 
-        // 4. Compute amount and sign.
-        //    amount is always positive; sign=+1 for expense, -1 for income/refund.
-        //    "차감" category keeps sign=+1 (PLAN §6, receipt-sum integrity).
-        let raw_amount = row.line_amount.or(row.total_amount);
-        let raw_amount = match raw_amount {
+        // 4. amount 계산 — 엑셀 부호를 반전해서 캐시플로우 부호로 저장.
+        //    기존 sign 컬럼은 폐기. 환불(엑셀 음수)은 저장 시 양수가 되어
+        //    같은 expense 카테고리 안에서 자연 차감.
+        let raw_amount = match row.line_amount.or(row.total_amount) {
             Some(a) => a,
             None => {
                 tracing::warn!("Row {}: no amount, skipping", row.row_index);
                 continue;
             }
         };
-
-        let is_deduction = row
-            .category_text
-            .as_deref()
-            .map(|c| to_norm_key(c) == "차감")
-            .unwrap_or(false);
-
-        let sign: i16 = if is_deduction {
-            1
-        } else if raw_amount < Decimal::ZERO {
-            -1
-        } else {
-            1
-        };
-
-        let amount = raw_amount.abs();
+        let amount = -raw_amount;
 
         // 5. Product mapping (memo-bearing rows only).
         let product_id = if let (Some(ref memo), Some(merch_id)) = (&row.memo, merchant_id) {
@@ -595,7 +578,6 @@ pub async fn run_pipeline(
             product_id,
             payment_method_id,
             amount,
-            sign,
             unit_price: row.unit_price,
             quantity: row.quantity,
             memo: row.memo.clone(),
