@@ -2,6 +2,7 @@ pub mod aliases;
 pub mod categories;
 pub mod export;
 pub mod import;
+pub mod income;
 pub mod merchant_stats;
 pub mod price;
 pub mod products;
@@ -31,6 +32,7 @@ pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
         .merge(import_route)
         .route("/api/transactions", get(transactions::handle_get_transactions))
         .route("/api/summary/:year/:month", get(summary::handle_get_summary))
+        .route("/api/summary/income/:year/:month", get(income::handle_get_income))
         .route("/api/settlement/:year/:month", get(settlement::handle_get_settlement))
         // M4-B: xlsx export
         .route("/api/export/:year/:month", get(export::handle_get_export))
