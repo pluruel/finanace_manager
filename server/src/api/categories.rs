@@ -1,11 +1,12 @@
-use axum::{extract::{Path, State}, http::StatusCode, Json};
+use axum::{extract::{Path, State}, Json};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::ExtractUser;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 
 // ── GET /api/categories ──────────────────────────────────────────────────────
 
@@ -166,11 +167,13 @@ pub async fn handle_patch_category_kind(
     ExtractUser(user): ExtractUser,
     Path(category_id): Path<Uuid>,
     Json(body): Json<PatchCategoryKindBody>,
-) -> Result<Json<PatchCategoryKindResponse>, (StatusCode, String)> {
+) -> AppResult<Json<PatchCategoryKindResponse>> {
     let owner_id = user.sub;
 
     if body.kind != "income" && body.kind != "expense" {
-        return Err((StatusCode::BAD_REQUEST, "kind must be 'income' or 'expense'".into()));
+        return Err(AppError::BadRequest(
+            "kind must be 'income' or 'expense'".into(),
+        ));
     }
 
     let row = sqlx::query!(
@@ -179,14 +182,16 @@ pub async fn handle_patch_category_kind(
         owner_id
     )
     .fetch_optional(&*pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .await?;
 
     let Some(found) = row else {
-        return Err((StatusCode::NOT_FOUND, "category not found".into()));
+        return Err(AppError::NotFound("category not found".into()));
     };
     if found.name == "차감" {
-        return Err((StatusCode::CONFLICT, "차감 is a protected category".into()));
+        return Err(AppError::Conflict(json!({
+            "error": "protected_category",
+            "message": "차감 is a protected category and cannot be re-typed",
+        })));
     }
 
     sqlx::query!(
@@ -196,8 +201,7 @@ pub async fn handle_patch_category_kind(
         owner_id
     )
     .execute(&*pool)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .await?;
 
     Ok(Json(PatchCategoryKindResponse {
         id: category_id,
