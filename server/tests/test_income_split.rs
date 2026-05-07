@@ -49,7 +49,7 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
     let pool = Arc::new(pool);
 
     // Create three ledger actors
-    let actor_gongjong = sqlx::query_scalar!(
+    let _actor_gongjong = sqlx::query_scalar!(
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '공동') RETURNING id",
         owner_id
     )
