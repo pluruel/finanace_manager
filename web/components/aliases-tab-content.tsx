@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { CheckCircle2, Trash2, Merge, Loader2, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Dialog,
@@ -461,6 +462,35 @@ export function AliasesTabContent({
     router.refresh();
   }
 
+  async function handleKindChange(itemId: string, nextKind: "income" | "expense") {
+    // optimistic update
+    const previous = items.find((it) => it.id === itemId)?.kind ?? null;
+    setItems((prev) =>
+      prev.map((it) => (it.id === itemId ? { ...it, kind: nextKind } : it)),
+    );
+    try {
+      const res = await fetch(`/api/categories-proxy/${itemId}/kind`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: nextKind }),
+      });
+      if (!res.ok) {
+        setItems((prev) =>
+          prev.map((it) => (it.id === itemId ? { ...it, kind: previous } : it)),
+        );
+        const text = await res.text().catch(() => "");
+        showToast(`종류 변경 실패: ${text || res.status}`, "error");
+      } else {
+        showToast(`${nextKind === "income" ? "수입" : "지출"} 으로 변경되었습니다.`);
+      }
+    } catch (err) {
+      setItems((prev) =>
+        prev.map((it) => (it.id === itemId ? { ...it, kind: previous } : it)),
+      );
+      showToast(err instanceof Error ? err.message : "Network error", "error");
+    }
+  }
+
   if (items.length === 0) {
     return (
       <>
@@ -484,6 +514,9 @@ export function AliasesTabContent({
               <th className="px-4 py-3 text-left font-medium">Entity name</th>
               <th className="px-4 py-3 text-left font-medium">Aliases (raw text / norm key)</th>
               <th className="px-4 py-3 text-left font-medium">State</th>
+              {scope === "category" && (
+                <th className="px-4 py-3 text-left font-medium">Kind</th>
+              )}
               <th className="px-4 py-3 text-right font-medium">Actions</th>
             </tr>
           </thead>
@@ -492,10 +525,12 @@ export function AliasesTabContent({
               <ItemRow
                 key={item.id}
                 item={item}
+                scope={scope}
                 isConfirming={confirming.has(item.id)}
                 onConfirm={() => handleConfirm(item)}
                 onMerge={() => setMergeTarget(item)}
                 onDeleteAlias={(aliasId, rawText) => setDeleteAlias({ entityId: item.id, aliasId, rawText })}
+                onKindChange={handleKindChange}
               />
             ))}
           </tbody>
@@ -537,16 +572,20 @@ export function AliasesTabContent({
 
 function ItemRow({
   item,
+  scope,
   isConfirming,
   onConfirm,
   onMerge,
   onDeleteAlias,
+  onKindChange,
 }: {
   item: ReviewQueueItem;
+  scope: Scope;
   isConfirming: boolean;
   onConfirm: () => void;
   onMerge: () => void;
   onDeleteAlias: (aliasId: string, rawText: string) => void;
+  onKindChange: (itemId: string, nextKind: "income" | "expense") => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const hasMultipleAliases = item.raw_texts.length > 1;
@@ -611,6 +650,25 @@ function ItemRow({
           {item.review_state}
         </Badge>
       </td>
+
+      {/* Kind toggle (category scope only) */}
+      {scope === "category" && (
+        <td className="px-4 py-3 align-top">
+          <div className="flex items-center gap-2">
+            <Switch
+              aria-label={`${item.name} 종류 토글`}
+              checked={item.kind === "income"}
+              disabled={item.name === "차감"}
+              onCheckedChange={(checked) =>
+                onKindChange(item.id, checked ? "income" : "expense")
+              }
+            />
+            <span className="text-xs text-muted-foreground">
+              {item.kind === "income" ? "수입" : "지출"}
+            </span>
+          </div>
+        </td>
+      )}
 
       {/* Actions */}
       <td className="px-4 py-3 align-top">

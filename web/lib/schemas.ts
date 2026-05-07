@@ -169,6 +169,7 @@ export const ReviewQueueItemSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
   review_state: z.string(),
+  kind: z.string().nullable().optional(), // present when scope === 'category'
   raw_texts: z.array(AliasInfoSchema),
   merge_candidates: z.array(MergeCandidateSchema),
 });
