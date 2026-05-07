@@ -13,7 +13,7 @@ import { LayoutDashboard, Download } from "lucide-react";
 import { MonthPicker } from "@/components/month-picker";
 import { SettlementCard } from "@/components/settlement-card";
 import { DashboardDonuts } from "@/components/dashboard-donuts";
-import { IncomeStrip } from "@/components/income-strip";
+import { DeductionDonut } from "@/components/deduction-donut";
 
 function parseYM(input: string | undefined): { year: number; month: number } {
   if (input && /^\d{4}-\d{2}$/.test(input)) {
@@ -44,11 +44,6 @@ async function fetchSummary(year: number, month: number): Promise<SummaryRespons
   }
 }
 
-async function SettlementSection({ year, month }: { year: number; month: number }) {
-  const data = await fetchSettlement(year, month);
-  return <SettlementCard year={year} month={month} data={data} compact />;
-}
-
 async function fetchIncome(year: number, month: number): Promise<IncomeResponse | null> {
   try {
     return await apiFetch<IncomeResponse>(`/api/summary/income/${year}/${month}`, {
@@ -59,14 +54,22 @@ async function fetchIncome(year: number, month: number): Promise<IncomeResponse 
   }
 }
 
-async function IncomeSection({ year, month }: { year: number; month: number }) {
-  const data = await fetchIncome(year, month);
-  return <IncomeStrip data={data} />;
+async function SettlementSection({ year, month }: { year: number; month: number }) {
+  const data = await fetchSettlement(year, month);
+  return <SettlementCard year={year} month={month} data={data} compact />;
 }
 
 async function DashboardDonutsSection({ year, month }: { year: number; month: number }) {
-  const data = await fetchSummary(year, month);
-  return <DashboardDonuts data={data} />;
+  const [summary, income] = await Promise.all([
+    fetchSummary(year, month),
+    fetchIncome(year, month),
+  ]);
+  return <DashboardDonuts summary={summary} income={income} />;
+}
+
+async function DeductionDonutSection({ year, month }: { year: number; month: number }) {
+  const summary = await fetchSummary(year, month);
+  return <DeductionDonut summary={summary} />;
 }
 
 interface PageProps {
@@ -109,17 +112,17 @@ export default async function DashboardPage({ searchParams }: PageProps) {
       </Suspense>
 
       <Suspense
-        key={`income-${sectionKey}`}
-        fallback={<StripSkeleton />}
-      >
-        <IncomeSection year={year} month={month} />
-      </Suspense>
-
-      <Suspense
         key={`donuts-${sectionKey}`}
         fallback={<DonutsSkeleton />}
       >
         <DashboardDonutsSection year={year} month={month} />
+      </Suspense>
+
+      <Suspense
+        key={`deduction-${sectionKey}`}
+        fallback={null}
+      >
+        <DeductionDonutSection year={year} month={month} />
       </Suspense>
     </div>
   );
