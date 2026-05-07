@@ -213,8 +213,19 @@ export function buildActorIncomeSlices(
   income: IncomeResponse | null,
   actorId: string | null,
 ): ActorDonutData {
+  const resolveName = (): string => {
+    if (!income) return actorId ?? "미지정";
+    const fromTotals = income.by_actor.find((a) => a.actor_id === actorId);
+    if (fromTotals) return fromTotals.actor_name;
+    for (const cat of income.categories) {
+      const cell = cat.by_actor.find((e) => e.actor_id === actorId);
+      if (cell) return cell.actor_name;
+    }
+    return actorId ?? "미지정";
+  };
+
   if (!income) {
-    return { actorId, actorName: actorId ?? "미지정", total: 0, slices: [] };
+    return { actorId, actorName: resolveName(), total: 0, slices: [] };
   }
   const raws: ExpenseRaw[] = [];
   for (const cat of income.categories) {
@@ -226,7 +237,7 @@ export function buildActorIncomeSlices(
   }
   const total = raws.reduce((acc, r) => acc + r.value, 0);
   const slices = topNWithOther(raws);
-  return { actorId, actorName: actorId ?? "미지정", total, slices };
+  return { actorId, actorName: resolveName(), total, slices };
 }
 
 /**
