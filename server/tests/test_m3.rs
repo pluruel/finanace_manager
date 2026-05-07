@@ -318,8 +318,11 @@ async fn merchant_stats_memo_less_only_total_matches_golden(pool: PgPool) {
     // rows whose merchant_id is non-null. Anchor the per-merchant sum against
     // the same scope.
     let direct: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "n!: i64" FROM transactions
-           WHERE owner_id = $1 AND product_id IS NULL AND merchant_id IS NOT NULL"#,
+        r#"SELECT COUNT(*) AS "n!: i64"
+           FROM transactions t
+           JOIN categories c ON c.id = t.category_id AND c.owner_id = t.owner_id
+           WHERE t.owner_id = $1 AND t.product_id IS NULL AND t.merchant_id IS NOT NULL
+             AND c.kind = 'expense'"#,
         owner_id
     )
     .fetch_one(&pool)

@@ -45,14 +45,26 @@ async fn upsert_category(
     let is_deduction = norm == "차감";
     let review_state = if is_deduction { "confirmed" } else { "pending" };
 
+    // 카테고리 이름 휴리스틱: 정규화된 이름에 income 키워드 포함 시 'income', 그 외 'expense'.
+    // ON CONFLICT DO NOTHING 으로 기존 row 의 kind 는 보존됨 (사용자 토글 / 잘못된 휴리스틱
+    // 모두 한 번 결정되면 유지). 휴리스틱은 보조이지 정답이 아님 — 실데이터에서 false positive 가
+    // 발견되면 /aliases Categories 탭에서 토글하면 영구 보존됨.
+    const INCOME_KEYWORDS: &[&str] = &["급여", "수입", "회수", "환급"];
+    let kind = if INCOME_KEYWORDS.iter().any(|kw| norm.contains(kw)) {
+        "income"
+    } else {
+        "expense"
+    };
+
     // 2. INSERT targeting the partial index; fallback SELECT on conflict.
     let cat_id_opt: Option<Uuid> = sqlx::query_scalar!(
         r#"INSERT INTO categories (owner_id, name, kind, review_state)
-           VALUES ($1, $2, 'expense', $3)
+           VALUES ($1, $2, $3, $4)
            ON CONFLICT (owner_id, name) WHERE parent_id IS NULL DO NOTHING
            RETURNING id"#,
         owner_id,
         norm,
+        kind,
         review_state,
     )
     .fetch_optional(&mut *conn)
