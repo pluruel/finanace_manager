@@ -102,7 +102,7 @@ Deployment / run flow:
 
 ### How to Run Tests
 - **Backend**: `cd server && cargo test -p server` (requires `DATABASE_URL`; an ephemeral test DB is created automatically).
-- **Frontend**: `cd web && npm test` (vitest, 58 tests).
+- **Frontend**: `cd web && npm test` (vitest, 110 tests).
 
 ### Subagent Model Policy
 When running subagent-driven development:
@@ -141,9 +141,10 @@ One Excel row is **not** equivalent to one transaction. A single receipt may dec
 - Every domain table carries `owner_id uuid NOT NULL`; no FK to auth-svc.
 - Money is stored as `numeric(15,2)`. Do not use `f64`.
 - Excel serial → DATE: epoch is **1899-12-30** (avoiding the 1900-02-29 bug).
-- Negative expenses are stored with `sign = -1` (no separate table).
+- `transactions.amount` is a **signed cash-flow value**: cash-in positive, cash-out negative. Excel is an expense ledger (지출 양수, 환불 음수); the importer flips the sign at write time. There is no separate `sign` column.
+- Income vs expense classification lives in **`categories.kind`** (`'income'` | `'expense'`) — driven by the user via the `/aliases` Categories tab toggle. Refunds and `차감` are NOT income; they remain `kind='expense'` with their own row-level sign expressing direction.
 - Single-line groups produce 1 row in `transactions`. Multi-line groups produce 1 header + N child rows = (1 + N) rows.
-- The `"차감"` (deduction) category is auto-created by the import pipeline (`kind='expense'`, `review_state='confirmed'`, protected). It is stored with `sign=+1`, but the `v_monthly_settlement` view separates it during settlement calculation.
+- The `"차감"` (deduction) category is auto-created by the import pipeline (`kind='expense'`, `review_state='confirmed'`, protected). It is stored with the same sign-flip rule as other rows; the `v_monthly_settlement` view isolates it via category name during settlement calculation.
 
 ---
 
@@ -163,3 +164,4 @@ One Excel row is **not** equivalent to one transaction. A single receipt may dec
 - 2026-05-03: M3 complete — 3 new backend modules (`server/src/api/{products,price,merchant_stats}.rs`) wired into the router (M1 `stubs.rs` deleted), plus `/price-history` page with Products / Merchants toggle (`web/app/(app)/price-history/page.tsx`, `web/components/{price-history-controls,price-history-chart,merchant-stats-chart}.tsx`). Recharts mocked in `web/__tests__/price-history.test.tsx`. Backend 71/71 (9 new in `tests/test_m3.rs`), frontend 86/86 (7 new). Acceptance: 6 고덕방 아이스아메리카노 rows render at ₩3,400 each. Memo-less row count: actual 64 in normalized `transactions` (memo→product mapping is aggressive).
 - 2026-05-03: M4 (MVP close-out) complete — (A) `001_init.sql` rewritten to add `review_state` to `payment_methods` (per "rewrite, don't accumulate" migration policy); `aliases.rs` review_queue + confirm now handle `payment_method` scope, resolving the prior dead-Payment-tab limitation. `categories.rs::PaymentMethodItem` exposes `review_state`. (B) New `server/src/api/export.rs` + `rust_xlsxwriter = "0.78"` produce a 3-sheet xlsx (Transactions / Settlement / Summary) at `GET /api/export/:year/:month`; frontend proxy `web/app/api/export-proxy/[year]/[month]/route.ts` + dashboard "Excel 다운로드" link in `(app)/page.tsx`. (C) Doc cleanup. Backend 76/76 (+5: 2 in `test_m2_step_b.rs`, 3 in new `test_m4_export.rs`); frontend 86/86 (no new tests — proxy route is a thin pass-through). MVP complete.
 - 2026-05-07: Dashboard donut redesign — `(app)/page.tsx` now renders a compact `SettlementCard` strip + `DashboardDonuts` grid (one `ActorDonut` per actor, top-6 categories + 기타 + 차감 pinned). New: `web/lib/donut-data.ts` (pure `buildActorSlices` + `collectOrderedActorIds` helpers), `web/components/{actor-donut,dashboard-donuts}.tsx`. Removed: `summary-pivot.tsx`, recent-transactions section. `SettlementCard` gained an opt-in `compact` prop. Frontend tests 102/102 (+16: 13 in `donut-data.test.ts`, 3 new `DashboardDonuts` cases in `dashboard.test.tsx`); recharts mocked out as in `price-history.test.tsx`. No backend changes. Spec/plan: `docs/superpowers/{specs,plans}/2026-05-07-dashboard-donuts*`.
+- 2026-05-07: Income/expense split + signed-amount convention — `transactions.sign` column dropped; `transactions.amount` is now a signed cash-flow value (cash-in positive, cash-out negative). Importer flips Excel sign at write time. `categories.kind` is the sole income/expense classifier; refunds and `차감` stay as `kind='expense'`. `v_monthly_settlement` rewritten with `-SUM(amount)` and `kind='expense'` filter. New endpoints: `GET /api/summary/income/:year/:month` (per-actor income totals, zero-filled) and `PATCH /api/categories/:id/kind` (with `차감` 409 protection). Frontend: new `IncomeStrip` between SettlementCard and DashboardDonuts; `/aliases` Categories tab adds inline 수입/지출 Switch (Radix); `signedNumber` helper retired in favor of `parseFloat(amount)`. `001_init.sql` rewritten in place per migration policy; existing data wiped + re-import required. Backend 81/81 (+5: 2 income, 3 kind-toggle), frontend 110/110 (+8: 3 income-strip, 4 kind-toggle, 1 dashboard smoke). Spec/plan: `docs/superpowers/{specs,plans}/2026-05-07-income-expense-sign-*`.
