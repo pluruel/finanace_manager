@@ -22,9 +22,10 @@ pub struct ActorRef {
 pub struct ByActorEntry {
     pub actor_id: Option<Uuid>,
     pub actor_name: String,
-    /// `-SUM(t.amount)` over expense-kind rows for this (category, actor) cell.
-    /// 저장 규약상 지출은 음수이므로 `-SUM` 으로 양수 지출 크기를 얻는다.
-    /// 음수가 나오면 환불이 일반 지출보다 컸다는 뜻. 프론트는 `Math.abs()` 로 슬라이스 크기 사용.
+    /// (category, actor) 셀의 합계. 호출 컨텍스트별 부호 규약:
+    /// - expense summary (`/api/summary`): `-SUM(t.amount)` — 지출은 저장상 음수라 부호 뒤집어 양수화.
+    ///   음수가 나오면 환불이 일반 지출보다 컸다는 뜻. 프론트는 `Math.abs()` 로 슬라이스 크기 사용.
+    /// - income summary (`/api/summary/income`): `SUM(t.amount)` 그대로 — 수입은 저장상 양수.
     pub amount: Decimal,
 }
 
@@ -35,7 +36,7 @@ pub struct CategorySummary {
     pub kind: String,
     /// 액터별 분해. 카테고리 합계 부호와 동일한 의미 체계.
     pub by_actor: Vec<ByActorEntry>,
-    /// 액터 합계의 단순 합. 양수 = 카테고리 전체가 지출 우세, 음수 = 환불 우세.
+    /// 액터 합계의 단순 합. 부호 규약은 `ByActorEntry::amount` 와 동일 — 호출 엔드포인트에 따라 다름.
     pub total: Decimal,
 }
 
