@@ -532,8 +532,9 @@ impl MigrationTrait for Migration {
         )
         .await?;
 
-        // transactions indexes — use raw SQL because the DSL doesn't support DESC direction
-        // on a single column easily (transactions_date_idx needs occurred_on DESC).
+        // transactions indexes — kept as raw SQL for symmetry with the partial-index block
+        // above; the DSL does support per-column IndexOrder::Desc but mixing styles for
+        // these adjacent index groups would be noisier.
         for (name, cols) in [
             ("transactions_date_idx", "owner_id, occurred_on DESC"),
             ("transactions_category_idx", "owner_id, category_id, occurred_on"),
