@@ -23,16 +23,17 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 tower = { version = "0.4" }
 
 # Database
-sqlx = { version = "0.7", features = [
-    "runtime-tokio",
-    "tls-rustls",
-    "postgres",
-    "uuid",
-    "chrono",
-    "rust_decimal",
-    "json",
-    "migrate",
+sea-orm = { version = "1", features = [
+    "runtime-tokio-rustls",
+    "sqlx-postgres",
+    "with-uuid",
+    "with-chrono",
+    "with-rust_decimal",
+    "with-json",
+    "macros",
+    "debug-print",
 ] }
+migration = { path = "migration" }
 
 # Auth / JWT
 jsonwebtoken = "9"
@@ -83,6 +84,8 @@ axum-test-helper = { version = "0.4", default-features = false }
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
+sea-orm = { version = "1", features = ["mock"] }   # for unit-test mocks if needed later
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [profile.release]
 opt-level = 3
