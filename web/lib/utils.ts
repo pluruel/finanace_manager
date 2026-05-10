@@ -17,15 +17,15 @@ export function formatKRW(amount: string | null | undefined): string {
 }
 
 /**
- * sign과 amount를 고려해 표시 금액을 반환한다.
- * sign=-1이면 수입(마이너스 지출)이므로 앞에 - 표시.
+ * Decimal string 을 천단위 콤마 + 음수면 - 접두사로 표시.
+ * 부호는 amount 문자열 자체에 들어 있다.
  */
-export function formatAmount(amount: string | null | undefined, sign: number): string {
-  if (!amount) return "₩0";
-  const num = parseFloat(amount);
-  if (isNaN(num)) return "₩0";
-  const formatted = `₩${num.toLocaleString("ko-KR")}`;
-  return sign === -1 ? `-${formatted}` : formatted;
+export function formatAmount(amount: string | null | undefined): string {
+  if (amount == null) return "";
+  const v = parseFloat(amount);
+  if (Number.isNaN(v)) return amount;
+  const formatted = Math.abs(v).toLocaleString();
+  return v < 0 ? `-${formatted}` : formatted;
 }
 
 /**

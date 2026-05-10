@@ -147,7 +147,7 @@ async fn import_golden_integrity_sql_zero_violations(pool: PgPool) {
             SELECT
                 g.group_id,
                 g.header_total,
-                COALESCE(SUM(t.amount * t.sign), 0) AS lines_sum
+                COALESCE(-SUM(t.amount), 0) AS lines_sum
             FROM (
                 SELECT group_id, total_amount AS header_total
                 FROM transactions_raw
@@ -157,7 +157,7 @@ async fn import_golden_integrity_sql_zero_violations(pool: PgPool) {
             ) g
             LEFT JOIN transactions t ON t.group_id = g.group_id AND t.owner_id = $1
             GROUP BY g.group_id, g.header_total
-            HAVING g.header_total <> COALESCE(SUM(t.amount * t.sign), 0)
+            HAVING g.header_total <> COALESCE(-SUM(t.amount), 0)
         ) violations
         "#,
         owner_id,

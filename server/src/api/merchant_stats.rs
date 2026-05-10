@@ -28,7 +28,7 @@ pub struct MerchantStatsQuery {
 pub struct MonthlyMerchantPoint {
     /// First-of-month date.
     pub month: NaiveDate,
-    /// Sum of (amount * sign) for the (merchant, month) cell.
+    /// `-SUM(t.amount)` over expense rows for the (merchant, month) cell — positive expense magnitude.
     pub total: Decimal,
     /// Count of transactions in the cell.
     pub transaction_count: i64,
@@ -79,12 +79,14 @@ pub async fn handle_get_merchant_stats(
         r#"
         SELECT
             date_trunc('month', t.occurred_on)::date     AS "month!: NaiveDate",
-            SUM(t.amount * t.sign)::numeric(15,2)        AS "total!: Decimal",
+            (-SUM(t.amount))::numeric(15,2)              AS "total!: Decimal",
             COUNT(*)                                     AS "tx_count!: i64",
             COUNT(*) FILTER (WHERE t.product_id IS NULL) AS "memo_less!: i64"
         FROM transactions t
+        JOIN categories c ON c.id = t.category_id AND c.owner_id = t.owner_id
         WHERE t.owner_id = $1
           AND t.merchant_id = $2
+          AND c.kind = 'expense'
           AND ($3::date IS NULL OR t.occurred_on >= $3)
           AND ($4::date IS NULL OR t.occurred_on <= $4)
           AND ($5 = false OR t.product_id IS NULL)

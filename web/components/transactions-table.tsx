@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -165,20 +165,21 @@ const columns = [
   }),
 
   col.accessor(
-    (row) => ({ amount: row.item.amount, sign: row.item.sign }),
+    (row) => row.item.amount,
     {
       id: "amount",
       header: "금액",
       cell: ({ getValue }) => {
-        const { amount, sign } = getValue<{ amount: string; sign: number }>();
+        const amount = getValue<string>();
+        const isCashIn = parseFloat(amount) > 0;
         return (
           <span
             className={cn(
               "text-sm font-medium tabular-nums text-right",
-              sign === -1 ? "text-blue-600" : "text-foreground",
+              isCashIn ? "text-blue-600" : "text-foreground",
             )}
           >
-            {formatAmount(amount, sign)}
+            {formatAmount(amount)}
           </span>
         );
       },
@@ -259,7 +260,7 @@ export function TransactionsTable({
   const router = useRouter();
   const [expanded, setExpanded] = useState<ExpandedState>({});
 
-  const tableData = buildTableData(items);
+  const tableData = useMemo(() => buildTableData(items), [items]);
 
   const table = useReactTable({
     data: tableData,

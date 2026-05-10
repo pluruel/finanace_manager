@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"n!: i64\"\n           FROM transactions t\n           JOIN categories c ON c.id = t.category_id AND c.owner_id = t.owner_id\n           WHERE t.owner_id = $1 AND t.product_id IS NULL AND t.merchant_id IS NOT NULL\n             AND c.kind = 'expense'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "n!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9c1f7111c3a420f35b71c7c39005dda40cf049b45b67e6728c3a2de04994e86e"
+}

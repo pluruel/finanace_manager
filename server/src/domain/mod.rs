@@ -25,6 +25,7 @@ pub struct RawRow {
 }
 
 /// 정규화된 거래 행 (transactions에 저장될 형태)
+/// amount 는 캐시플로우 부호: 현금 유입 양수, 유출 음수 (엑셀 금액을 반전해서 저장).
 #[derive(Debug, Clone)]
 pub struct TransactionRow {
     pub raw_id: Uuid,
@@ -36,7 +37,6 @@ pub struct TransactionRow {
     pub product_id: Option<Uuid>,
     pub payment_method_id: Option<Uuid>,
     pub amount: Decimal,
-    pub sign: i16,
     pub unit_price: Option<Decimal>,
     pub quantity: Option<Decimal>,
     pub memo: Option<String>,

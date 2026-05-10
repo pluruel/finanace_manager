@@ -191,8 +191,8 @@ async fn merge_merchant_remaps_transactions(pool: PgPool) {
         sqlx::query!(
             r#"INSERT INTO transactions
                (owner_id, raw_id, group_id, occurred_on, merchant_id, actor_id,
-                category_id, payment_method_id, amount, sign)
-               VALUES ($1, $2, gen_random_uuid(), '2026-02-01', $3, $4, $5, $6, 10000, 1)"#,
+                category_id, payment_method_id, amount)
+               VALUES ($1, $2, gen_random_uuid(), '2026-02-01', $3, $4, $5, $6, -10000)"#,
             owner_id, raw_id, src_merchant_id, actor_id, cat_id, pm_id
         )
         .execute(&*pool)
@@ -342,8 +342,8 @@ async fn merge_product_remaps_product_id(pool: PgPool) {
         sqlx::query!(
             r#"INSERT INTO transactions
                (owner_id, raw_id, group_id, occurred_on, merchant_id, actor_id,
-                category_id, product_id, payment_method_id, amount, sign, memo)
-               VALUES ($1, $2, gen_random_uuid(), '2026-02-01', $3, $4, $5, $6, $7, 34000, 1, '조닌끼안티')"#,
+                category_id, product_id, payment_method_id, amount, memo)
+               VALUES ($1, $2, gen_random_uuid(), '2026-02-01', $3, $4, $5, $6, $7, -34000, '조닌끼안티')"#,
             owner_id, raw_id, merchant_id, actor_id, cat_id, src_product_id, pm_id
         )
         .execute(&*pool)

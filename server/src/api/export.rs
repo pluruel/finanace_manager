@@ -76,16 +76,15 @@ async fn build_workbook(
         let sheet = wb.add_worksheet().set_name("Transactions").map_err(xlsx_err)?;
         let cols = [
             "occurred_on",
-            "merchant",
             "actor",
             "category",
-            "product",
-            "payment_method",
+            "kind",
+            "merchant",
+            "memo",
             "amount",
-            "sign",
+            "payment_method",
             "unit_price",
             "quantity",
-            "memo",
             "group_id",
         ];
         for (i, c) in cols.iter().enumerate() {
@@ -96,50 +95,60 @@ async fn build_workbook(
 
         for (r, t) in txns.iter().enumerate() {
             let row = (r + 1) as u32;
+            // col 0: occurred_on
             sheet
                 .write_with_format(row, 0, &t.occurred_on, &date_fmt)
                 .map_err(xlsx_err)?;
+            // col 1: actor
             sheet
-                .write_string(row, 1, t.merchant.as_deref().unwrap_or(""))
+                .write_string(row, 1, t.actor.as_deref().unwrap_or(""))
                 .map_err(xlsx_err)?;
+            // col 2: category
             sheet
-                .write_string(row, 2, t.actor.as_deref().unwrap_or(""))
+                .write_string(row, 2, t.category.as_deref().unwrap_or(""))
                 .map_err(xlsx_err)?;
+            // col 3: kind
             sheet
-                .write_string(row, 3, t.category.as_deref().unwrap_or(""))
+                .write_string(row, 3, t.kind.as_deref().unwrap_or(""))
                 .map_err(xlsx_err)?;
+            // col 4: merchant
             sheet
-                .write_string(row, 4, t.product.as_deref().unwrap_or(""))
+                .write_string(row, 4, t.merchant.as_deref().unwrap_or(""))
                 .map_err(xlsx_err)?;
+            // col 5: memo
             sheet
-                .write_string(row, 5, t.payment_method.as_deref().unwrap_or(""))
+                .write_string(row, 5, t.memo.as_deref().unwrap_or(""))
                 .map_err(xlsx_err)?;
+            // col 6: amount (signed cash-flow value directly)
             sheet
                 .write_number_with_format(row, 6, decimal_to_f64(&t.amount), &money_fmt)
                 .map_err(xlsx_err)?;
-            sheet.write_number(row, 7, t.sign as f64).map_err(xlsx_err)?;
+            // col 7: payment_method
+            sheet
+                .write_string(row, 7, t.payment_method.as_deref().unwrap_or(""))
+                .map_err(xlsx_err)?;
+            // col 8: unit_price
             if let Some(up) = &t.unit_price {
                 sheet
                     .write_number_with_format(row, 8, decimal_to_f64(up), &money_fmt)
                     .map_err(xlsx_err)?;
             }
+            // col 9: quantity
             if let Some(q) = &t.quantity {
                 sheet.write_number(row, 9, decimal_to_f64(q)).map_err(xlsx_err)?;
             }
+            // col 10: group_id
             sheet
-                .write_string(row, 10, t.memo.as_deref().unwrap_or(""))
-                .map_err(xlsx_err)?;
-            sheet
-                .write_string(row, 11, &t.group_id.to_string())
+                .write_string(row, 10, &t.group_id.to_string())
                 .map_err(xlsx_err)?;
         }
 
         sheet.set_column_width(0, 12.0).ok();
-        sheet.set_column_width(1, 16.0).ok();
-        sheet.set_column_width(3, 14.0).ok();
-        sheet.set_column_width(4, 18.0).ok();
-        sheet.set_column_width(10, 24.0).ok();
-        sheet.set_column_width(11, 36.0).ok();
+        sheet.set_column_width(1, 14.0).ok();
+        sheet.set_column_width(2, 14.0).ok();
+        sheet.set_column_width(4, 16.0).ok();
+        sheet.set_column_width(5, 24.0).ok();
+        sheet.set_column_width(10, 36.0).ok();
     }
 
     // ── Sheet 2: Settlement ──────────────────────────────────────────────────
@@ -237,10 +246,9 @@ struct ExportTxn {
     merchant: Option<String>,
     actor: Option<String>,
     category: Option<String>,
-    product: Option<String>,
+    kind: Option<String>,
     payment_method: Option<String>,
     amount: Decimal,
-    sign: i16,
     unit_price: Option<Decimal>,
     quantity: Option<Decimal>,
     memo: Option<String>,
@@ -260,10 +268,9 @@ async fn fetch_transactions(
             m.name         AS "merchant?: String",
             a.name         AS "actor?: String",
             c.name         AS "category?: String",
-            p.name         AS "product?: String",
+            c.kind         AS "kind?: String",
             pm.name        AS "payment_method?: String",
             t.amount       AS "amount!: Decimal",
-            t.sign         AS "sign!: i16",
             t.unit_price   AS "unit_price?: Decimal",
             t.quantity     AS "quantity?: Decimal",
             t.memo         AS "memo?: String",
@@ -272,7 +279,6 @@ async fn fetch_transactions(
         LEFT JOIN merchants m        ON m.id  = t.merchant_id        AND m.owner_id  = t.owner_id
         LEFT JOIN ledger_actors a    ON a.id  = t.actor_id           AND a.owner_id  = t.owner_id
         LEFT JOIN categories c       ON c.id  = t.category_id        AND c.owner_id  = t.owner_id
-        LEFT JOIN products p         ON p.id  = t.product_id         AND p.owner_id  = t.owner_id
         LEFT JOIN payment_methods pm ON pm.id = t.payment_method_id  AND pm.owner_id = t.owner_id
         WHERE t.owner_id = $1
           AND t.occurred_on >= make_date($2, $3, 1)
@@ -293,10 +299,9 @@ async fn fetch_transactions(
             merchant: r.merchant,
             actor: r.actor,
             category: r.category,
-            product: r.product,
+            kind: r.kind,
             payment_method: r.payment_method,
             amount: r.amount,
-            sign: r.sign,
             unit_price: r.unit_price,
             quantity: r.quantity,
             memo: r.memo,
@@ -363,11 +368,12 @@ async fn fetch_summary(
         SELECT
             c.name AS "category!: String",
             COALESCE(a.name, '(미지정)') AS "actor!: String",
-            (SUM(t.amount * t.sign))::text AS "net_text?: String"
+            (-SUM(t.amount))::text AS "net_text?: String"
         FROM transactions t
         JOIN categories c         ON c.id = t.category_id AND c.owner_id = t.owner_id
         LEFT JOIN ledger_actors a ON a.id = t.actor_id    AND a.owner_id = t.owner_id
         WHERE t.owner_id = $1
+          AND c.kind = 'expense'
           AND t.occurred_on >= make_date($2, $3, 1)
           AND t.occurred_on  < make_date($2, $3, 1) + INTERVAL '1 month'
         GROUP BY c.name, a.name

@@ -12,24 +12,21 @@ use uuid::Uuid;
 use crate::auth::ExtractUser;
 use crate::error::AppResult;
 
-// ── Response types ────────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize)]
 pub struct ActorRef {
-    /// NULL when the transaction has no actor_id or the actor row is missing.
     pub actor_id: Option<Uuid>,
     pub actor_name: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ByActorEntry {
-    /// NULL when the transaction has no actor_id or the actor row is missing.
     pub actor_id: Option<Uuid>,
     pub actor_name: String,
-    /// Absolute value of the net signed sum for this (category, actor) cell.
+    /// (category, actor) 셀의 합계. 호출 컨텍스트별 부호 규약:
+    /// - expense summary (`/api/summary`): `-SUM(t.amount)` — 지출은 저장상 음수라 부호 뒤집어 양수화.
+    ///   음수가 나오면 환불이 일반 지출보다 컸다는 뜻. 프론트는 `Math.abs()` 로 슬라이스 크기 사용.
+    /// - income summary (`/api/summary/income`): `SUM(t.amount)` 그대로 — 수입은 저장상 양수.
     pub amount: Decimal,
-    /// Direction: +1 = net expense, -1 = net income/refund, 0 = zero.
-    pub sign: i16,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,10 +34,9 @@ pub struct CategorySummary {
     pub category_id: Uuid,
     pub category_name: String,
     pub kind: String,
-    /// Per-actor breakdown for this category.
+    /// 액터별 분해. 카테고리 합계 부호와 동일한 의미 체계.
     pub by_actor: Vec<ByActorEntry>,
-    /// Absolute net total across all actors: abs(SUM(amount * sign)).
-    /// Reflects the same directionality as the by_actor entries.
+    /// 액터 합계의 단순 합. 부호 규약은 `ByActorEntry::amount` 와 동일 — 호출 엔드포인트에 따라 다름.
     pub total: Decimal,
 }
 
@@ -52,13 +48,10 @@ pub struct SummaryResponse {
     pub actors: Vec<ActorRef>,
 }
 
-// ── Handler ───────────────────────────────────────────────────────────────────
-
 /// GET /api/summary/:year/:month
 ///
-/// Category × actor pivot for the requested month.
-/// Amount semantics: SUM(amount * sign) per (category, actor).
-/// "차감" is included as a normal category row here; /api/settlement separates it.
+/// 지출 카테고리(`kind='expense'`) 만 반환한다. 수입은 별도 엔드포인트(`/api/summary/income`).
+/// amount = -SUM(t.amount) 로 양수화 (저장상 지출은 음수).
 pub async fn handle_get_summary(
     State(pool): State<Arc<PgPool>>,
     ExtractUser(user): ExtractUser,
@@ -66,9 +59,6 @@ pub async fn handle_get_summary(
 ) -> AppResult<Json<SummaryResponse>> {
     let owner_id = user.sub;
 
-    // SUM(amount * sign) gives the net signed total per (category, actor).
-    // LEFT JOIN ledger_actors so that transactions with NULL actor_id are included
-    // and grouped under a synthetic "(미지정)" actor.
     let rows = sqlx::query!(
         r#"
         SELECT
@@ -77,15 +67,16 @@ pub async fn handle_get_summary(
             c.kind      AS "kind!: String",
             a.id        AS "actor_id?: Uuid",
             a.name      AS "actor_name?: String",
-            SUM(t.amount * t.sign)::numeric(15,2) AS "net_amount!: Decimal"
+            (-SUM(t.amount))::numeric(15,2) AS "amount!: Decimal"
         FROM transactions t
         JOIN categories c         ON c.id = t.category_id AND c.owner_id = t.owner_id
         LEFT JOIN ledger_actors a ON a.id = t.actor_id    AND a.owner_id = t.owner_id
         WHERE t.owner_id = $1
+          AND c.kind = 'expense'
           AND t.occurred_on >= make_date($2, $3, 1)
           AND t.occurred_on  < make_date($2, $3, 1) + INTERVAL '1 month'
         GROUP BY c.id, c.name, c.kind, a.id, a.name
-        ORDER BY c.kind, c.name, a.name
+        ORDER BY c.name, a.name
         "#,
         owner_id,
         year,
@@ -94,12 +85,9 @@ pub async fn handle_get_summary(
     .fetch_all(&*pool)
     .await?;
 
-    // Collect unique actors (in order of first appearance).
-    // actor_id=None maps to the synthetic "(미지정)" slot.
     let mut actor_order: Vec<Option<Uuid>> = Vec::new();
     let mut actor_map: HashMap<Option<Uuid>, String> = HashMap::new();
 
-    // Group rows by category.
     let mut category_order: Vec<Uuid> = Vec::new();
     let mut category_meta: HashMap<Uuid, (String, String)> = HashMap::new();
     let mut category_actors: HashMap<Uuid, Vec<ByActorEntry>> = HashMap::new();
@@ -118,44 +106,31 @@ pub async fn handle_get_summary(
             category_meta.insert(row.category_id, (row.category_name.clone(), row.kind.clone()));
         }
 
-        // Derive sign from the net: positive net → sign=1, negative → sign=-1, zero → 0.
-        let net = row.net_amount;
-        let sign: i16 = if net > Decimal::ZERO {
-            1
-        } else if net < Decimal::ZERO {
-            -1
-        } else {
-            0
-        };
-
         category_actors
             .entry(row.category_id)
             .or_default()
             .push(ByActorEntry {
                 actor_id,
                 actor_name,
-                amount: net.abs(),
-                sign,
+                amount: row.amount,
             });
     }
 
-    // Build response.
     let categories: Vec<CategorySummary> = category_order
         .into_iter()
         .map(|cid| {
             let (name, kind) = category_meta.remove(&cid).unwrap();
             let by_actor = category_actors.remove(&cid).unwrap_or_default();
-            // Category total = sum of (amount * sign) across actors.
-            let net_total: Decimal = by_actor
+            let total: Decimal = by_actor
                 .iter()
-                .map(|e| e.amount * Decimal::from(e.sign))
+                .map(|e| e.amount)
                 .fold(Decimal::ZERO, |acc, x| acc + x);
             CategorySummary {
                 category_id: cid,
                 category_name: name,
                 kind,
                 by_actor,
-                total: net_total.abs(),
+                total,
             }
         })
         .collect();

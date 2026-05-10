@@ -2,6 +2,7 @@ pub mod aliases;
 pub mod categories;
 pub mod export;
 pub mod import;
+pub mod income;
 pub mod merchant_stats;
 pub mod price;
 pub mod products;
@@ -12,7 +13,7 @@ pub mod transactions;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use sqlx::PgPool;
@@ -31,6 +32,7 @@ pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
         .merge(import_route)
         .route("/api/transactions", get(transactions::handle_get_transactions))
         .route("/api/summary/:year/:month", get(summary::handle_get_summary))
+        .route("/api/summary/income/:year/:month", get(income::handle_get_income))
         .route("/api/settlement/:year/:month", get(settlement::handle_get_settlement))
         // M4-B: xlsx export
         .route("/api/export/:year/:month", get(export::handle_get_export))
@@ -51,6 +53,10 @@ pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
             post(aliases::handle_confirm_entity),
         )
         .route("/api/categories", get(categories::handle_get_categories))
+        .route(
+            "/api/categories/:id/kind",
+            patch(categories::handle_patch_category_kind),
+        )
         .route("/api/merchants", get(categories::handle_get_merchants))
         .route("/api/payment-methods", get(categories::handle_get_payment_methods))
         .with_state(pool.clone())

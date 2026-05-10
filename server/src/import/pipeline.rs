@@ -45,14 +45,27 @@ async fn upsert_category(
     let is_deduction = norm == "차감";
     let review_state = if is_deduction { "confirmed" } else { "pending" };
 
+    // 카테고리 이름 휴리스틱: 정규화된 이름에 income 키워드 포함 시 'income', 그 외 'expense'.
+    // ON CONFLICT DO NOTHING 으로 기존 row 의 kind 는 보존됨 (사용자 토글 / 잘못된 휴리스틱
+    // 모두 한 번 결정되면 유지). 휴리스틱은 보조이지 정답이 아님 — 실데이터에서 false positive 가
+    // 발견되면 /aliases Categories 탭에서 토글하면 영구 보존됨.
+    // "보험" 단독은 보험료(지출)로 두고, 부호 분리된 income 측 카테고리 이름인 "보험금"만 매칭.
+    const INCOME_KEYWORDS: &[&str] = &["급여", "수입", "회수", "환급", "보험금"];
+    let kind = if INCOME_KEYWORDS.iter().any(|kw| norm.contains(kw)) {
+        "income"
+    } else {
+        "expense"
+    };
+
     // 2. INSERT targeting the partial index; fallback SELECT on conflict.
     let cat_id_opt: Option<Uuid> = sqlx::query_scalar!(
         r#"INSERT INTO categories (owner_id, name, kind, review_state)
-           VALUES ($1, $2, 'expense', $3)
+           VALUES ($1, $2, $3, $4)
            ON CONFLICT (owner_id, name) WHERE parent_id IS NULL DO NOTHING
            RETURNING id"#,
         owner_id,
         norm,
+        kind,
         review_state,
     )
     .fetch_optional(&mut *conn)
@@ -395,11 +408,11 @@ async fn insert_transaction(
         r#"INSERT INTO transactions (
             owner_id, raw_id, group_id, occurred_on,
             merchant_id, actor_id, category_id, product_id, payment_method_id,
-            amount, sign, unit_price, quantity, memo
+            amount, unit_price, quantity, memo
         ) VALUES (
             $1, $2, $3, $4,
             $5, $6, $7, $8, $9,
-            $10, $11, $12, $13, $14
+            $10, $11, $12, $13
         ) RETURNING id"#,
         owner_id,
         t.raw_id,
@@ -411,7 +424,6 @@ async fn insert_transaction(
         t.product_id,
         t.payment_method_id,
         t.amount,
-        t.sign as i16,
         t.unit_price,
         t.quantity,
         t.memo,
@@ -433,7 +445,7 @@ pub async fn check_group_integrity(
         SELECT
             g.group_id,
             g.header_total,
-            COALESCE(SUM(t.amount * t.sign), 0) AS lines_sum
+            COALESCE(-SUM(t.amount), 0) AS lines_sum
         FROM (
             SELECT group_id, total_amount AS header_total
             FROM transactions_raw
@@ -443,7 +455,7 @@ pub async fn check_group_integrity(
         ) g
         LEFT JOIN transactions t ON t.group_id = g.group_id AND t.owner_id = $1
         GROUP BY g.group_id, g.header_total
-        HAVING g.header_total <> COALESCE(SUM(t.amount * t.sign), 0)
+        HAVING g.header_total <> COALESCE(-SUM(t.amount), 0)
         "#,
         owner_id,
         batch_id,
@@ -489,7 +501,19 @@ pub async fn run_pipeline(
             }
         };
 
-        // 3. Normalize each text column → entity id.
+        // 3. amount 계산 — Excel 은 지출 장부 부호 (지출 양수, 환불 음수).
+        //    DB 는 캐시플로우 부호 (유입 양수, 유출 음수). 그래서 부호 반전.
+        //    환불은 저장 후 양수가 되어 같은 expense 카테고리 안에서 자연 차감.
+        let raw_amount = match row.line_amount.or(row.total_amount) {
+            Some(a) => a,
+            None => {
+                tracing::warn!("Row {}: no amount, skipping", row.row_index);
+                continue;
+            }
+        };
+        let amount = -raw_amount;
+
+        // 4. Normalize each text column → entity id.
 
         // merchant
         let merchant_id = if let Some(ref text) = row.merchant_text {
@@ -514,14 +538,22 @@ pub async fn run_pipeline(
             None
         };
 
-        // category
+        // category — 보험 부호 분리 규칙:
+        //   Excel 양수("보험" 보험료 지출) → "보험" (kind=expense)
+        //   Excel 음수("보험" 환급/보험금 수령) → "보험금" (kind=income, INCOME_KEYWORDS 매칭)
+        // 정확히 norm_key=="보험" 인 행에만 적용 — "자동차보험" 같은 명시적 지출 카테고리는 그대로 둔다.
         let category_id = if let Some(ref text) = row.category_text {
-            let (id, is_new) = upsert_category(conn, owner_id, text).await?;
+            let resolved_text: String = if to_norm_key(text) == "보험" && raw_amount.is_sign_negative() {
+                "보험금".to_string()
+            } else {
+                text.clone()
+            };
+            let (id, is_new) = upsert_category(conn, owner_id, &resolved_text).await?;
             if is_new {
                 unresolved.push(UnresolvedAlias {
                     scope: "category".to_string(),
-                    raw_text: text.clone(),
-                    norm_key: to_norm_key(text),
+                    raw_text: resolved_text.clone(),
+                    norm_key: to_norm_key(&resolved_text),
                 });
             }
             Some(id)
@@ -536,34 +568,6 @@ pub async fn run_pipeline(
         } else {
             None
         };
-
-        // 4. Compute amount and sign.
-        //    amount is always positive; sign=+1 for expense, -1 for income/refund.
-        //    "차감" category keeps sign=+1 (PLAN §6, receipt-sum integrity).
-        let raw_amount = row.line_amount.or(row.total_amount);
-        let raw_amount = match raw_amount {
-            Some(a) => a,
-            None => {
-                tracing::warn!("Row {}: no amount, skipping", row.row_index);
-                continue;
-            }
-        };
-
-        let is_deduction = row
-            .category_text
-            .as_deref()
-            .map(|c| to_norm_key(c) == "차감")
-            .unwrap_or(false);
-
-        let sign: i16 = if is_deduction {
-            1
-        } else if raw_amount < Decimal::ZERO {
-            -1
-        } else {
-            1
-        };
-
-        let amount = raw_amount.abs();
 
         // 5. Product mapping (memo-bearing rows only).
         let product_id = if let (Some(ref memo), Some(merch_id)) = (&row.memo, merchant_id) {
@@ -595,7 +599,6 @@ pub async fn run_pipeline(
             product_id,
             payment_method_id,
             amount,
-            sign,
             unit_price: row.unit_price,
             quantity: row.quantity,
             memo: row.memo.clone(),

@@ -118,19 +118,20 @@ CREATE INDEX transactions_raw_date_idx ON transactions_raw (owner_id, occurred_o
 CREATE INDEX transactions_raw_group_idx ON transactions_raw (owner_id, group_id);
 
 -- 정규화된 거래 (대시보드/집계의 소스). 라인 단위 저장.
+-- amount 는 캐시플로우 부호: 현금 유입 양수, 유출 음수.
+-- 임포트 시 엑셀 라인 금액의 부호를 반전해서 저장한다 (엑셀은 지출 장부 관점이므로).
 CREATE TABLE transactions (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_id          uuid NOT NULL,
   raw_id            uuid NOT NULL REFERENCES transactions_raw(id) ON DELETE CASCADE,
-  group_id          uuid NOT NULL,       -- transactions_raw.group_id와 동일
+  group_id          uuid NOT NULL,
   occurred_on       date NOT NULL,
   merchant_id       uuid REFERENCES merchants(id),
   actor_id          uuid REFERENCES ledger_actors(id),
   category_id       uuid REFERENCES categories(id),
-  product_id        uuid REFERENCES products(id),   -- 메모 있는 행만 채움
+  product_id        uuid REFERENCES products(id),
   payment_method_id uuid REFERENCES payment_methods(id),
-  amount            numeric(15,2) NOT NULL,  -- 항상 양수 (line_amount의 절댓값)
-  sign              smallint NOT NULL CHECK (sign IN (-1, 1)),  -- -1=수입(회수), 1=지출
+  amount            numeric(15,2) NOT NULL,  -- 캐시플로우 부호 (유입+/유출-)
   unit_price        numeric(15,4),
   quantity          numeric(15,4),
   memo              text
@@ -142,25 +143,25 @@ CREATE INDEX transactions_product_idx ON transactions (owner_id, product_id, occ
 CREATE INDEX transactions_group_idx ON transactions (owner_id, group_id);
 
 -- 정산 뷰: 차감을 분리한 공동 정산 산출
--- 집계 시트의 "경비인정 / 차감 / 입금액" 산식을 SQL로 재현
--- recognized_expense: 공동 actor의 일반 지출 (차감 제외)
--- deducted_amount: 차감 카테고리 총합 (actor 무관)
+-- 저장 규약상 지출은 음수, 차감도 음수, 환불은 양수.
+-- 정산 카드는 양수로 표시하므로 모두 -SUM(...) 로 양수화한다.
+-- recognized_expense: 공동 actor 의 일반 지출(차감 제외) 양수화
+-- deducted_amount: 차감 카테고리 합계(actor 무관) 양수화
 -- settlement_input: recognized_expense - deducted_amount
+-- 수입(kind='income')은 정산에 포함하지 않는다 (도메인 규칙).
 CREATE VIEW v_monthly_settlement AS
 SELECT
   t.owner_id,
   date_trunc('month', t.occurred_on)::date AS month,
-  -- 공동 actor의 일반 지출 (차감 제외)
-  COALESCE(SUM(t.amount) FILTER (WHERE actor.name = '공동' AND t.sign = 1 AND c.name <> '차감'), 0)
-    AS recognized_expense,
-  -- 차감 카테고리 총합 (actor 무관)
-  COALESCE(SUM(t.amount) FILTER (WHERE c.name = '차감'), 0)
-    AS deducted_amount,
-  -- 입금액 = 경비인정 - 차감
-  COALESCE(SUM(t.amount) FILTER (WHERE actor.name = '공동' AND t.sign = 1 AND c.name <> '차감'), 0)
-  - COALESCE(SUM(t.amount) FILTER (WHERE c.name = '차감'), 0)
-    AS settlement_input
+  COALESCE(-SUM(t.amount) FILTER (
+    WHERE actor.name = '공동' AND c.kind = 'expense' AND c.name <> '차감'
+  ), 0) AS recognized_expense,
+  COALESCE(-SUM(t.amount) FILTER (WHERE c.name = '차감'), 0) AS deducted_amount,
+  COALESCE(-SUM(t.amount) FILTER (
+    WHERE actor.name = '공동' AND c.kind = 'expense' AND c.name <> '차감'
+  ), 0)
+  - COALESCE(-SUM(t.amount) FILTER (WHERE c.name = '차감'), 0) AS settlement_input
 FROM transactions t
-JOIN categories c         ON c.id     = t.category_id
-JOIN ledger_actors actor  ON actor.id = t.actor_id
+JOIN categories c        ON c.id     = t.category_id
+JOIN ledger_actors actor ON actor.id = t.actor_id
 GROUP BY t.owner_id, date_trunc('month', t.occurred_on);

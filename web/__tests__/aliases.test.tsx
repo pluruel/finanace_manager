@@ -81,6 +81,7 @@ function makeCategoryItem(overrides: Partial<ReviewQueueItem> = {}): ReviewQueue
     id: "1111aaaa-0000-0000-0000-000000000001",
     name: "식비",
     review_state: "pending",
+    kind: "expense",
     raw_texts: [
       {
         alias_id: "2222bbbb-0000-0000-0000-000000000001",
@@ -407,7 +408,90 @@ describe("DELETE alias error path", () => {
   });
 });
 
-// ── Test 4: Tab switching state isolation ─────────────────────────────────────
+// ── Test 4: Kind toggle (category scope) ─────────────────────────────────────
+
+describe("Kind toggle on category scope", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockRefresh.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("category scope: kind 토글이 PATCH 호출을 발생시킨다", async () => {
+    const user = userEvent.setup();
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ id: "1111aaaa-0000-0000-0000-000000000001", kind: "income" }),
+    });
+    global.fetch = fetchMock;
+
+    const item = makeCategoryItem({ kind: "expense" });
+    render(<AliasesTabContent scope="category" initialItems={[item]} />);
+
+    // The kind toggle switch should be present for category scope
+    const toggle = screen.getByRole("switch", { name: /식비 종류 토글/i });
+    expect(toggle).toBeTruthy();
+    // Initially data-state=unchecked because kind is 'expense'
+    expect(toggle.getAttribute("data-state")).toBe("unchecked");
+
+    // Click the switch to toggle to 'income'
+    await user.click(toggle);
+
+    await waitFor(() => {
+      // fetch should have been called with PATCH to the categories-proxy
+      const patchCall = fetchMock.mock.calls.find(
+        ([url, opts]) =>
+          typeof url === "string" &&
+          url.includes("/api/categories-proxy/") &&
+          url.includes("/kind") &&
+          (opts as RequestInit)?.method === "PATCH",
+      );
+      expect(patchCall).toBeTruthy();
+      const body = JSON.parse((patchCall![1] as RequestInit).body as string);
+      expect(body.kind).toBe("income");
+    });
+
+    // Toast should appear
+    await waitFor(() => {
+      const toastEls = screen.queryAllByText(/수입 으로 변경되었습니다/);
+      expect(toastEls.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("차감 카테고리는 토글이 disabled 이다", () => {
+    const chagang = makeCategoryItem({
+      id: "3333cccc-0000-0000-0000-000000000001",
+      name: "차감",
+      kind: "expense",
+    });
+
+    render(<AliasesTabContent scope="category" initialItems={[chagang]} />);
+
+    const toggle = screen.getByRole("switch", { name: /차감 종류 토글/i });
+    expect(toggle).toBeTruthy();
+    expect(toggle.getAttribute("data-disabled")).toBe("");
+  });
+
+  it("Kind 컬럼 헤더가 category 탭에서만 표시된다", () => {
+    const categoryItem = makeCategoryItem();
+    const merchantItem = makeMerchantItem();
+
+    const { rerender } = render(
+      <AliasesTabContent scope="category" initialItems={[categoryItem]} />,
+    );
+    expect(screen.queryAllByText("Kind").length).toBeGreaterThan(0);
+
+    rerender(<AliasesTabContent scope="merchant" initialItems={[merchantItem]} />);
+    expect(screen.queryAllByText("Kind").length).toBe(0);
+  });
+});
+
+// ── Test 5: Tab switching state isolation ─────────────────────────────────────
 
 describe("Tab switching state isolation", () => {
   beforeEach(() => {

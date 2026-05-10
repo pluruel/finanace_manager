@@ -10,57 +10,55 @@ import { describe, it, expect } from "vitest";
 import { formatAmount, formatKRW, formatDate } from "../lib/utils";
 
 describe("formatAmount", () => {
-  it("formats positive amount with sign=1", () => {
-    const result = formatAmount("24900.00", 1);
+  it("formats positive amount (no sign prefix)", () => {
+    const result = formatAmount("24900.00");
     expect(result).toContain("24,900");
-    expect(result).toContain("₩");
     expect(result).not.toMatch(/^-/);
   });
 
-  it("formats negative amount with sign=-1", () => {
-    const result = formatAmount("5000.00", -1);
+  it("formats negative amount string with - prefix", () => {
+    const result = formatAmount("-5000.00");
     expect(result).toMatch(/^-/);
     expect(result).toContain("5,000");
   });
 
   it("formats zero amount", () => {
-    const result = formatAmount("0", 1);
-    expect(result).toContain("₩");
-    // "₩0" 형태
-    expect(result).toBe("₩0");
+    const result = formatAmount("0");
+    expect(result).toBe("0");
   });
 
   it("formats large amount", () => {
-    const result = formatAmount("1000000.00", 1);
+    const result = formatAmount("1000000.00");
     expect(result).toContain("1,000,000");
     expect(result).not.toMatch(/^-/);
   });
 
-  it("returns ₩0 for null", () => {
-    const result = formatAmount(null, 1);
-    expect(result).toBe("₩0");
+  it("returns empty string for null", () => {
+    const result = formatAmount(null);
+    expect(result).toBe("");
   });
 
-  it("returns ₩0 for undefined", () => {
-    const result = formatAmount(undefined, 1);
-    expect(result).toBe("₩0");
+  it("returns empty string for undefined", () => {
+    const result = formatAmount(undefined);
+    expect(result).toBe("");
   });
 
-  it("returns ₩0 for NaN-like string", () => {
-    const result = formatAmount("invalid", 1);
-    expect(result).toBe("₩0");
+  it("returns the original string for NaN-like string", () => {
+    const result = formatAmount("invalid");
+    expect(result).toBe("invalid");
   });
 
-  it("formats amount with sign=-1 as negative", () => {
-    const result = formatAmount("7500.00", -1);
+  it("formats negative amount string (refund/income) with - prefix", () => {
+    const result = formatAmount("-7500.00");
     expect(result.startsWith("-")).toBe(true);
     expect(result).toContain("7,500");
   });
 
-  it("formats deduction amount (sign=1) without minus prefix", () => {
-    // 차감 카테고리는 sign=+1이므로 음수 표시 없음
-    const result = formatAmount("7500.00", 1);
+  it("formats deduction amount (positive) without minus prefix", () => {
+    // 차감 카테고리는 amount 자체가 양수이므로 음수 표시 없음
+    const result = formatAmount("3000");
     expect(result.startsWith("-")).toBe(false);
+    expect(result).toContain("3,000");
   });
 });
 

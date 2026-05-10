@@ -24,8 +24,7 @@ export type TransactionItem = {
   product_name: string | null;
   payment_method_id: string | null;
   payment_method_name: string | null;
-  amount: string; // Decimal → string
-  sign: number; // i16 (-1 | 1)
+  amount: string; // Decimal → string (signed cash-flow value)
   unit_price: string | null;
   quantity: string | null;
   memo: string | null;
@@ -50,7 +49,6 @@ export const TransactionItemSchema: z.ZodType<TransactionItem, z.ZodTypeDef, unk
     payment_method_id: z.string().uuid().nullable(),
     payment_method_name: z.string().nullable(),
     amount: DecimalSchema,
-    sign: z.number().int(),
     unit_price: DecimalSchema.nullable(),
     quantity: DecimalSchema.nullable(),
     memo: z.string().nullable(),
@@ -124,7 +122,6 @@ export const ByActorEntrySchema = z.object({
   actor_id: z.string().uuid().nullable(),
   actor_name: z.string(),
   amount: DecimalSchema,
-  sign: z.number().int(),
 });
 
 export type ByActorEntry = z.infer<typeof ByActorEntrySchema>;
@@ -172,6 +169,7 @@ export const ReviewQueueItemSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
   review_state: z.string(),
+  kind: z.string().nullable().optional(), // present when scope === 'category'
   raw_texts: z.array(AliasInfoSchema),
   merge_candidates: z.array(MergeCandidateSchema),
 });
@@ -267,6 +265,24 @@ export const MerchantStatsResponseSchema = z.object({
 });
 
 export type MerchantStatsResponse = z.infer<typeof MerchantStatsResponseSchema>;
+
+// ─── Income (수입) — server/src/api/income.rs ─────────────────────────────
+export const IncomeByActorSchema = z.object({
+  actor_id: z.string().uuid().nullable(),
+  actor_name: z.string(),
+  total: DecimalSchema,
+});
+
+export type IncomeByActor = z.infer<typeof IncomeByActorSchema>;
+
+export const IncomeResponseSchema = z.object({
+  month: z.string(),
+  by_actor: z.array(IncomeByActorSchema),
+  total: DecimalSchema,
+  categories: z.array(CategorySummarySchema),
+});
+
+export type IncomeResponse = z.infer<typeof IncomeResponseSchema>;
 
 // ─── 필터 파라미터 ──────────────────────────────────────────────────────────
 export const TransactionFilterSchema = z.object({

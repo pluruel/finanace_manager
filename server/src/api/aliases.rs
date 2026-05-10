@@ -101,6 +101,8 @@ pub struct ReviewQueueItem {
     pub id: Uuid,
     pub name: String,
     pub review_state: String,
+    /// Present only for `scope = "category"`. Null for all other scopes.
+    pub kind: Option<String>,
     pub raw_texts: Vec<AliasInfo>,
     pub merge_candidates: Vec<MergeCandidate>,
 }
@@ -173,15 +175,15 @@ async fn review_queue_for_scope(
     .collect();
 
     // Only work on pending entities.
-    let pending: Vec<(Uuid, String)> = all_entities
+    let pending: Vec<(Uuid, String, Option<String>)> = all_entities
         .iter()
-        .filter(|(_, _, rs)| rs == "pending")
-        .map(|(id, name, _)| (*id, name.clone()))
+        .filter(|(_, _, rs, _)| rs == "pending")
+        .map(|(id, name, _, kind)| (*id, name.clone(), kind.clone()))
         .collect();
 
     let mut items = Vec::with_capacity(pending.len());
 
-    for (entity_id, entity_name) in &pending {
+    for (entity_id, entity_name, entity_kind) in &pending {
         // Collect aliases that point to this entity.
         let raw_texts: Vec<AliasInfo> = all_aliases
             .iter()
@@ -201,7 +203,7 @@ async fn review_queue_for_scope(
         let entity_name_lower = entity_name.to_lowercase();
         let merge_candidates: Vec<MergeCandidate> = all_entities
             .iter()
-            .filter(|(other_id, other_name, _)| {
+            .filter(|(other_id, other_name, _, _)| {
                 if other_id == entity_id {
                     return false;
                 }
@@ -224,7 +226,7 @@ async fn review_queue_for_scope(
                 let dist = levenshtein(&entity_name_lower, &other_name.to_lowercase());
                 dist <= 1
             })
-            .map(|(id, name, _)| MergeCandidate {
+            .map(|(id, name, _, _)| MergeCandidate {
                 id: *id,
                 name: name.clone(),
             })
@@ -235,6 +237,7 @@ async fn review_queue_for_scope(
             id: *entity_id,
             name: entity_name.clone(),
             review_state: "pending".to_string(),
+            kind: entity_kind.clone(),
             raw_texts,
             merge_candidates,
         });
@@ -243,22 +246,23 @@ async fn review_queue_for_scope(
     Ok(items)
 }
 
-/// Returns (id, name, review_state) for all entities of the given scope.
+/// Returns (id, name, review_state, kind) for all entities of the given scope.
+/// `kind` is Some("income"|"expense") for category scope; None for all other scopes.
 async fn fetch_all_entities(
     conn: &mut PgConnection,
     owner_id: Uuid,
     scope: &str,
-) -> Result<Vec<(Uuid, String, String)>, AppError> {
+) -> Result<Vec<(Uuid, String, String, Option<String>)>, AppError> {
     let rows = match scope {
         "category" => sqlx::query!(
-            r#"SELECT id AS "id!: Uuid", name AS "name!", review_state AS "review_state!"
+            r#"SELECT id AS "id!: Uuid", name AS "name!", review_state AS "review_state!", kind AS "kind!"
                FROM categories WHERE owner_id = $1 ORDER BY name"#,
             owner_id
         )
         .fetch_all(&mut *conn)
         .await?
         .into_iter()
-        .map(|r| (r.id, r.name, r.review_state))
+        .map(|r| (r.id, r.name, r.review_state, Some(r.kind)))
         .collect(),
 
         "merchant" => sqlx::query!(
@@ -269,7 +273,7 @@ async fn fetch_all_entities(
         .fetch_all(&mut *conn)
         .await?
         .into_iter()
-        .map(|r| (r.id, r.name, r.review_state))
+        .map(|r| (r.id, r.name, r.review_state, None))
         .collect(),
 
         "payment_method" => sqlx::query!(
@@ -280,7 +284,7 @@ async fn fetch_all_entities(
         .fetch_all(&mut *conn)
         .await?
         .into_iter()
-        .map(|r| (r.id, r.name, r.review_state))
+        .map(|r| (r.id, r.name, r.review_state, None))
         .collect(),
 
         "actor" => {
@@ -297,7 +301,7 @@ async fn fetch_all_entities(
         .fetch_all(&mut *conn)
         .await?
         .into_iter()
-        .map(|r| (r.id, r.name, r.review_state))
+        .map(|r| (r.id, r.name, r.review_state, None))
         .collect(),
 
         _ => return Err(AppError::BadRequest(format!("Unknown scope: {}", scope))),

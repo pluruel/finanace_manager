@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO transactions\n           (owner_id, raw_id, group_id, occurred_on, actor_id, category_id, amount)\n           VALUES ($1, $2, $3, '2026-02-25', $4, $5, 4500000)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf5d98f78b32c5e5363f8ae2b2b3ac1579a43afbae77c23f94d4a4d4eb170c22"
+}
