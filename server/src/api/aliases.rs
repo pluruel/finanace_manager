@@ -11,14 +11,15 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sea_orm::DatabaseConnection;
 use sqlx::PgConnection;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::ExtractUser;
+use crate::entity::{aliases, prelude::Aliases};
 use crate::error::{AppError, AppResult};
 use crate::import::normalize::to_norm_key;
 
@@ -493,18 +494,15 @@ pub async fn handle_delete_alias(
     ExtractUser(user): ExtractUser,
     Path(alias_id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
-    let result = sqlx::query!(
-        r#"DELETE FROM aliases WHERE id = $1 AND owner_id = $2"#,
-        alias_id,
-        owner_id,
-    )
-    .execute(&*pool)
-    .await?;
+    let result = Aliases::delete_many()
+        .filter(aliases::Column::Id.eq(alias_id))
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .exec(&*db)
+        .await?;
 
-    if result.rows_affected() == 0 {
+    if result.rows_affected == 0 {
         return Err(AppError::NotFound(format!(
             "Alias {} not found or not owned by you",
             alias_id
