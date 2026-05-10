@@ -13,6 +13,9 @@ use uuid::Uuid;
 const ADMIN_DB_ENV: &str = "DATABASE_URL";
 
 pub struct TestDb {
+    /// Wrapped in Arc because sea-orm's `mock` feature (in dev-dependencies) makes
+    /// `DatabaseConnection` non-Clone, and `Drop` types can't be moved out of the
+    /// struct's `Drop` impl. Tests use `Arc::clone(&t.db)` to hand it to routers.
     pub db: std::sync::Arc<DatabaseConnection>,
     pub pool: sqlx::PgPool,
     pub url: String,
@@ -64,6 +67,8 @@ impl TestDb {
 }
 
 impl Drop for TestDb {
+    /// Cleanup spawns a fresh tokio runtime on a thread because the test's own runtime
+    /// may already be tearing down at Drop time, making `tokio::spawn` racy/forbidden.
     fn drop(&mut self) {
         let admin_url = self.admin_url.clone();
         let db_name = self.db_name.clone();
