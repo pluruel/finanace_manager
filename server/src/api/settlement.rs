@@ -3,7 +3,7 @@ use axum::{
     Json,
 };
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -22,6 +22,13 @@ pub struct SettlementResponse {
     pub settlement_input: Decimal,
 }
 
+#[derive(FromQueryResult)]
+struct SettlementRow {
+    recognized_expense: Decimal,
+    deducted_amount: Decimal,
+    settlement_input: Decimal,
+}
+
 /// GET /api/settlement/:year/:month
 ///
 /// Queries v_monthly_settlement for the requested month.
@@ -31,26 +38,24 @@ pub async fn handle_get_settlement(
     ExtractUser(user): ExtractUser,
     Path((year, month)): Path<(i32, i32)>,
 ) -> AppResult<Json<SettlementResponse>> {
-    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     // v_monthly_settlement groups by date_trunc('month', occurred_on)::date.
     // We match on the first day of the requested month.
-    let row = sqlx::query!(
+    let row = SettlementRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            recognized_expense AS "recognized_expense!: Decimal",
-            deducted_amount    AS "deducted_amount!: Decimal",
-            settlement_input   AS "settlement_input!: Decimal"
+            recognized_expense,
+            deducted_amount,
+            settlement_input
         FROM v_monthly_settlement
         WHERE owner_id = $1
           AND month = make_date($2, $3, 1)
         "#,
-        owner_id,
-        year,
-        month,
-    )
-    .fetch_optional(pool)
+        [owner_id.into(), year.into(), month.into()],
+    ))
+    .one(&*db)
     .await?;
 
     // If no data for that month, return zeros rather than 404.
