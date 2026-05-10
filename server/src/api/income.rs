@@ -3,7 +3,7 @@ use axum::{
     Json,
 };
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -30,6 +30,23 @@ pub struct IncomeResponse {
     pub categories: Vec<CategorySummary>,
 }
 
+#[derive(FromQueryResult)]
+struct IncomeByActorRow {
+    actor_id: Uuid,
+    actor_name: String,
+    total: Decimal,
+}
+
+#[derive(FromQueryResult)]
+struct IncomeCatRow {
+    category_id: Uuid,
+    category_name: String,
+    kind: String,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    amount: Decimal,
+}
+
 /// GET /api/summary/income/:year/:month
 ///
 /// 해당 월의 `kind='income'` 카테고리 트랜잭션을 액터별로 합산한다.
@@ -41,14 +58,14 @@ pub async fn handle_get_income(
     ExtractUser(user): ExtractUser,
     Path((year, month)): Path<(i32, i32)>,
 ) -> AppResult<Json<IncomeResponse>> {
-    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
-    let by_actor_rows = sqlx::query!(
+    let by_actor_rows = IncomeByActorRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            a.id   AS "actor_id!: Uuid",
-            a.name AS "actor_name!: String",
+            a.id   AS actor_id,
+            a.name AS actor_name,
             COALESCE(
                 (SELECT SUM(t.amount)
                  FROM transactions t
@@ -59,16 +76,14 @@ pub async fn handle_get_income(
                    AND t.occurred_on >= make_date($2, $3, 1)
                    AND t.occurred_on  < make_date($2, $3, 1) + INTERVAL '1 month'),
                 0::numeric(15,2)
-            ) AS "total!: Decimal"
+            ) AS total
         FROM ledger_actors a
         WHERE a.owner_id = $1
         ORDER BY a.name
         "#,
-        owner_id,
-        year,
-        month,
-    )
-    .fetch_all(pool)
+        [owner_id.into(), year.into(), month.into()],
+    ))
+    .all(&*db)
     .await?;
 
     let by_actor: Vec<IncomeByActor> = by_actor_rows
@@ -83,15 +98,16 @@ pub async fn handle_get_income(
     let total: Decimal = by_actor.iter().map(|e| e.total).sum();
 
     // ── categories breakdown (income kind, sign preserved) ──────────────────
-    let cat_rows = sqlx::query!(
+    let cat_rows = IncomeCatRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            c.id        AS "category_id!: Uuid",
-            c.name      AS "category_name!: String",
-            c.kind      AS "kind!: String",
-            a.id        AS "actor_id?: Uuid",
-            a.name      AS "actor_name?: String",
-            (SUM(t.amount))::numeric(15,2) AS "amount!: Decimal"
+            c.id        AS category_id,
+            c.name      AS category_name,
+            c.kind      AS kind,
+            a.id        AS actor_id,
+            a.name      AS actor_name,
+            (SUM(t.amount))::numeric(15,2) AS amount
         FROM transactions t
         JOIN categories c         ON c.id = t.category_id AND c.owner_id = t.owner_id
         LEFT JOIN ledger_actors a ON a.id = t.actor_id    AND a.owner_id = t.owner_id
@@ -102,11 +118,9 @@ pub async fn handle_get_income(
         GROUP BY c.id, c.name, c.kind, a.id, a.name
         ORDER BY c.name, a.name
         "#,
-        owner_id,
-        year,
-        month,
-    )
-    .fetch_all(pool)
+        [owner_id.into(), year.into(), month.into()],
+    ))
+    .all(&*db)
     .await?;
 
     let mut category_order: Vec<Uuid> = Vec::new();
