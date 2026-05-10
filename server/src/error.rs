@@ -37,6 +37,9 @@ pub enum AppError {
     #[error("Database error: {0}")]
     Database(sqlx::Error),
 
+    #[error("ORM error: {0}")]
+    Orm(sea_orm::DbErr),
+
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -56,6 +59,13 @@ impl From<sqlx::Error> for AppError {
             }
         }
         AppError::Database(e)
+    }
+}
+
+/// sea_orm::DbErr → AppError 변환
+impl From<sea_orm::DbErr> for AppError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        AppError::Orm(e)
     }
 }
 
@@ -92,6 +102,11 @@ impl IntoResponse for AppError {
             }
             AppError::Database(e) => {
                 tracing::error!("Database error: {:?}", e);
+                let body = Json(json!({ "detail": "Database error" }));
+                (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+            }
+            AppError::Orm(e) => {
+                tracing::error!("ORM error: {:?}", e);
                 let body = Json(json!({ "detail": "Database error" }));
                 (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
             }
