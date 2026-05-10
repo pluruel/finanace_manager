@@ -1,7 +1,7 @@
 use axum::{extract::{Path, State}, Json};
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -20,9 +20,10 @@ pub struct CategoryItem {
 }
 
 pub async fn handle_get_categories(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
 ) -> AppResult<Json<Vec<CategoryItem>>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     let rows = sqlx::query!(
@@ -39,7 +40,7 @@ pub async fn handle_get_categories(
         "#,
         owner_id
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let items = rows
@@ -66,9 +67,10 @@ pub struct MerchantItem {
 }
 
 pub async fn handle_get_merchants(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
 ) -> AppResult<Json<Vec<MerchantItem>>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     let rows = sqlx::query!(
@@ -83,7 +85,7 @@ pub async fn handle_get_merchants(
         "#,
         owner_id
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let items = rows
@@ -110,9 +112,10 @@ pub struct PaymentMethodItem {
 }
 
 pub async fn handle_get_payment_methods(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
 ) -> AppResult<Json<Vec<PaymentMethodItem>>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     let rows = sqlx::query!(
@@ -130,7 +133,7 @@ pub async fn handle_get_payment_methods(
         "#,
         owner_id
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let items = rows
@@ -163,11 +166,12 @@ pub struct PatchCategoryKindResponse {
 /// PATCH /api/categories/:id/kind — toggle income/expense classification.
 /// `차감` 카테고리는 시스템 보호 카테고리이므로 변경 불가.
 pub async fn handle_patch_category_kind(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path(category_id): Path<Uuid>,
     Json(body): Json<PatchCategoryKindBody>,
 ) -> AppResult<Json<PatchCategoryKindResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     if body.kind != "income" && body.kind != "expense" {
@@ -181,7 +185,7 @@ pub async fn handle_patch_category_kind(
         category_id,
         owner_id
     )
-    .fetch_optional(&*pool)
+    .fetch_optional(pool)
     .await?;
 
     let Some(found) = row else {
@@ -200,7 +204,7 @@ pub async fn handle_patch_category_kind(
         category_id,
         owner_id
     )
-    .execute(&*pool)
+    .execute(pool)
     .await?;
 
     Ok(Json(PatchCategoryKindResponse {

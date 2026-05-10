@@ -3,8 +3,8 @@ use axum::{
     Json,
 };
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -37,10 +37,11 @@ pub struct IncomeResponse {
 /// 등록된 모든 액터를 by_actor 에 포함하되 거래 없는 액터는 total=0 으로 채운다.
 /// `categories` 는 income kind 카테고리만 포함하며 expense summary 와 동일 셰이프.
 pub async fn handle_get_income(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path((year, month)): Path<(i32, i32)>,
 ) -> AppResult<Json<IncomeResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     let by_actor_rows = sqlx::query!(
@@ -67,7 +68,7 @@ pub async fn handle_get_income(
         year,
         month,
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let by_actor: Vec<IncomeByActor> = by_actor_rows
@@ -105,7 +106,7 @@ pub async fn handle_get_income(
         year,
         month,
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let mut category_order: Vec<Uuid> = Vec::new();

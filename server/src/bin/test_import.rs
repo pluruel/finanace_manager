@@ -1,6 +1,7 @@
 /// M1 검증용 독립 바이너리
 /// 실제 JWT 없이 pipeline을 직접 테스트
 /// usage: DATABASE_URL=... cargo run --bin test_import
+use migration::MigratorTrait;
 use uuid::Uuid;
 
 #[tokio::main]
@@ -12,7 +13,9 @@ async fn main() -> anyhow::Result<()> {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://app:app@localhost:5432/finance".to_string());
 
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let db = finance_manager::db::create_db(&database_url).await?;
+    migration::Migrator::up(&db, None).await?;
+    let pool = finance_manager::db::pool_of(&db);
 
     // 테스트용 owner_id (실제 auth-svc sub UUID 형식)
     let owner_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001")
@@ -87,11 +90,11 @@ async fn main() -> anyhow::Result<()> {
                 owner_id,
                 hash_vec,
             )
-            .fetch_one(&pool)
+            .fetch_one(pool)
             .await?;
 
             sqlx::query!("DELETE FROM import_batches WHERE id = $1", existing_id)
-                .execute(&pool)
+                .execute(pool)
                 .await?;
 
             let mut tx2 = pool.begin().await?;
@@ -116,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
 
             println!("Re-import batch: {}", new_id);
             print_results(transactions_inserted, &integrity_warnings, &unresolved);
-            return verify_db(&pool, owner_id).await;
+            return verify_db(pool, owner_id).await;
         }
     };
 
@@ -127,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
     tx.commit().await?;
 
     print_results(transactions_inserted, &integrity_warnings, &unresolved);
-    verify_db(&pool, owner_id).await
+    verify_db(pool, owner_id).await
 }
 
 fn print_results(

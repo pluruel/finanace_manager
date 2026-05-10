@@ -1,13 +1,13 @@
 /// 테스트 3: 임포트 통합 (DB 사용)
 ///
-/// #[sqlx::test] 매크로: 각 테스트마다 임시 DB 생성 + migrations 자동 실행 + 테스트 후 정리
-///
 /// 검증:
 /// - 골든 xlsx 임포트 → transactions 카운트 177
 /// - product_id IS NULL 행 수 = 63 (메모 없는 행)
 /// - 그룹 합계 무결성 SQL 0건
 /// - v_monthly_settlement 2026-02-01 deducted_amount=7500
 /// - 동일 파일 두 번 임포트 → 두 번째는 409 + DB 상태 불변
+
+mod common;
 
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use finance_manager::import::pipeline::run_pipeline;
@@ -72,13 +72,15 @@ async fn run_import(
     Ok((batch_id, transactions_inserted, integrity_warnings))
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn import_golden_transactions_count(pool: PgPool) {
+#[tokio::test]
+async fn import_golden_transactions_count() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    let (_, tx_count, warnings) = run_import(&pool, owner_id, &bytes, filename)
+    let (_, tx_count, warnings) = run_import(pool, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -99,13 +101,15 @@ async fn import_golden_transactions_count(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn import_golden_product_null_count(pool: PgPool) {
+#[tokio::test]
+async fn import_golden_product_null_count() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    run_import(&pool, owner_id, &bytes, filename)
+    run_import(pool, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -117,7 +121,7 @@ async fn import_golden_product_null_count(pool: PgPool) {
         r#"SELECT COUNT(*)::bigint FROM transactions WHERE owner_id = $1 AND product_id IS NULL"#,
         owner_id
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("query failed")
     .unwrap_or(0);
@@ -129,13 +133,15 @@ async fn import_golden_product_null_count(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn import_golden_integrity_sql_zero_violations(pool: PgPool) {
+#[tokio::test]
+async fn import_golden_integrity_sql_zero_violations() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    let (batch_id, _, _) = run_import(&pool, owner_id, &bytes, filename)
+    let (batch_id, _, _) = run_import(pool, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -163,7 +169,7 @@ async fn import_golden_integrity_sql_zero_violations(pool: PgPool) {
         owner_id,
         batch_id,
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("integrity SQL failed")
     .unwrap_or(0);
@@ -175,13 +181,15 @@ async fn import_golden_integrity_sql_zero_violations(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn import_golden_settlement_deducted_amount(pool: PgPool) {
+#[tokio::test]
+async fn import_golden_settlement_deducted_amount() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    run_import(&pool, owner_id, &bytes, filename)
+    run_import(pool, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -197,7 +205,7 @@ async fn import_golden_settlement_deducted_amount(pool: PgPool) {
         "#,
         owner_id
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("v_monthly_settlement query failed");
 
@@ -221,21 +229,23 @@ async fn import_golden_settlement_deducted_amount(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn import_duplicate_returns_conflict(pool: PgPool) {
+#[tokio::test]
+async fn import_duplicate_returns_conflict() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
     // 1차 임포트 성공
-    let (_, tx_count_1, _) = run_import(&pool, owner_id, &bytes, filename)
+    let (_, tx_count_1, _) = run_import(pool, owner_id, &bytes, filename)
         .await
         .expect("first import failed");
 
     assert_eq!(tx_count_1, 177);
 
     // 2차 임포트 → CONFLICT 에러
-    let result = run_import(&pool, owner_id, &bytes, filename).await;
+    let result = run_import(pool, owner_id, &bytes, filename).await;
     assert!(
         result.is_err(),
         "두 번째 임포트는 에러를 반환해야 한다"
@@ -252,7 +262,7 @@ async fn import_duplicate_returns_conflict(pool: PgPool) {
         r#"SELECT COUNT(*)::bigint FROM transactions WHERE owner_id = $1"#,
         owner_id
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("count query failed")
     .unwrap_or(0);
@@ -263,14 +273,16 @@ async fn import_duplicate_returns_conflict(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn import_single_batch_verified(pool: PgPool) {
+#[tokio::test]
+async fn import_single_batch_verified() {
     // 단일 트랜잭션 임포트: import_batches가 정확히 1건만 생성됨
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    run_import(&pool, owner_id, &bytes, filename)
+    run_import(pool, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -278,7 +290,7 @@ async fn import_single_batch_verified(pool: PgPool) {
         r#"SELECT COUNT(*)::bigint FROM import_batches WHERE owner_id = $1"#,
         owner_id
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("query failed")
     .unwrap_or(0);

@@ -4,8 +4,8 @@ use axum::{
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -53,10 +53,11 @@ pub struct MerchantStatsResponse {
 /// where unit-price tracking isn't possible (PLAN §6 M3 acceptance criteria —
 /// the 167 memo-less Feb rows are surfaced here).
 pub async fn handle_get_merchant_stats(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(q): Query<MerchantStatsQuery>,
 ) -> AppResult<Json<MerchantStatsResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
     let merchant_id = q
         .merchant_id
@@ -71,7 +72,7 @@ pub async fn handle_get_merchant_stats(
         owner_id,
         merchant_id,
     )
-    .fetch_optional(&*pool)
+    .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound(format!("merchant {merchant_id}")))?;
 
@@ -99,7 +100,7 @@ pub async fn handle_get_merchant_stats(
         q.to as Option<NaiveDate>,
         q.memo_less_only,
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let points: Vec<MonthlyMerchantPoint> = rows

@@ -4,8 +4,8 @@ use axum::{
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -58,10 +58,11 @@ pub struct TransactionsResponse {
 /// 필터: from/to/category/actor/merchant/payment/product/group
 /// multi-line 그룹은 group_id로 묶어 children 배열로 반환
 pub async fn handle_get_transactions(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(q): Query<TransactionQuery>,
 ) -> AppResult<Json<TransactionsResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     // sqlx query! 매크로에서 LEFT JOIN nullable 컬럼은 "col?" 타입 힌트 필요
@@ -112,7 +113,7 @@ pub async fn handle_get_transactions(
         q.product as Option<String>,
         q.group as Option<Uuid>,
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     // group_id별로 묶기

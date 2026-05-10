@@ -5,6 +5,8 @@
 /// 3. GET /api/summary/2026/2 per-category sums for 외식 and 차감.
 /// 4. GET /api/settlement/2026/2 deducted_amount = 7500.
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -14,8 +16,10 @@ use finance_manager::auth::AuthUser;
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -67,7 +71,7 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
 }
 
 /// Build a test router for a given owner that includes the summary and settlement routes.
-fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -95,7 +99,7 @@ fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/payment-methods",
             routing::get(finance_manager::api::categories::handle_get_payment_methods),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -113,8 +117,10 @@ fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
 /// batch ids) would fail at the import_batches level. Instead, we call
 /// run_pipeline twice with distinct batch ids to force double-normalization.
 /// The second run must return identical entity ids and must not error.
-#[sqlx::test(migrations = "./migrations")]
-async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
+#[tokio::test]
+async fn atomic_upsert_same_id_on_second_call() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -155,7 +161,7 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
         r#"SELECT id AS "id!: Uuid", name FROM categories WHERE owner_id = $1 ORDER BY name"#,
         owner_id
     )
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .unwrap()
     .into_iter()
@@ -186,7 +192,7 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
         r#"SELECT id AS "id!: Uuid", name FROM categories WHERE owner_id = $1 ORDER BY name"#,
         owner_id
     )
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .unwrap()
     .into_iter()
@@ -203,7 +209,7 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
         r#"SELECT id AS "id!: Uuid", name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
         owner_id
     )
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .unwrap()
     .into_iter()
@@ -235,7 +241,7 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
         r#"SELECT id AS "id!: Uuid", name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
         owner_id
     )
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await
     .unwrap()
     .into_iter()
@@ -255,16 +261,18 @@ fn raw_rows_clone_count(bytes: &[u8], filename: &str) -> i32 {
 
 // ── Test 2: "차감" review_state = 'confirmed' ─────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn chagang_category_has_confirmed_review_state(pool: PgPool) {
+#[tokio::test]
+async fn chagang_category_has_confirmed_review_state() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
     let row = sqlx::query!(
         r#"SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'"#,
         owner_id
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("차감 category not found");
 
@@ -276,10 +284,12 @@ async fn chagang_category_has_confirmed_review_state(pool: PgPool) {
 }
 
 /// A second import must not downgrade an existing 'confirmed' 차감 row to 'pending'.
-#[sqlx::test(migrations = "./migrations")]
-async fn chagang_review_state_not_downgraded_on_reimport(pool: PgPool) {
+#[tokio::test]
+async fn chagang_review_state_not_downgraded_on_reimport() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
     // Manually set review_state to 'confirmed' (already should be).
     // Then run a second pipeline to confirm it stays 'confirmed'.
@@ -315,7 +325,7 @@ async fn chagang_review_state_not_downgraded_on_reimport(pool: PgPool) {
         r#"SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'"#,
         owner_id
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .expect("차감 category not found after reimport");
 
@@ -328,13 +338,15 @@ async fn chagang_review_state_not_downgraded_on_reimport(pool: PgPool) {
 
 // ── Test 3: GET /api/summary/2026/2 spot checks ────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn summary_2026_02_spot_check(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn summary_2026_02_spot_check() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/summary/2026/2")
         .body(Body::empty())
@@ -386,13 +398,15 @@ async fn summary_2026_02_spot_check(pool: PgPool) {
 
 // ── Test 4: GET /api/settlement/2026/2 ────────────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn settlement_2026_02_deducted_amount(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn settlement_2026_02_deducted_amount() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/settlement/2026/2")
         .body(Body::empty())
@@ -440,12 +454,13 @@ async fn settlement_2026_02_deducted_amount(pool: PgPool) {
 }
 
 /// Settlement for a month with no data must return zeros (not 404).
-#[sqlx::test(migrations = "./migrations")]
-async fn settlement_empty_month_returns_zeros(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn settlement_empty_month_returns_zeros() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/settlement/2025/1")
         .body(Body::empty())
@@ -468,13 +483,15 @@ async fn settlement_empty_month_returns_zeros(pool: PgPool) {
 
 // ── Test 5: read-only list endpoints ─────────────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn categories_list_returns_data(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn categories_list_returns_data() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/categories")
         .body(Body::empty())
@@ -498,13 +515,15 @@ async fn categories_list_returns_data(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn merchants_list_returns_data(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn merchants_list_returns_data() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/merchants")
         .body(Body::empty())
@@ -520,13 +539,15 @@ async fn merchants_list_returns_data(pool: PgPool) {
     assert!(!arr.is_empty(), "merchants must not be empty");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_methods_list_returns_data(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn payment_methods_list_returns_data() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/payment-methods")
         .body(Body::empty())

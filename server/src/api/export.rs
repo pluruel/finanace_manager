@@ -13,6 +13,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rust_xlsxwriter::{Format, FormatAlign, Workbook};
+use sea_orm::DatabaseConnection;
 use sqlx::PgPool;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
@@ -23,7 +24,7 @@ use crate::auth::ExtractUser;
 use crate::error::{AppError, AppResult};
 
 pub async fn handle_get_export(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path((year, month)): Path<(i32, i32)>,
 ) -> AppResult<impl IntoResponse> {
@@ -34,8 +35,9 @@ pub async fn handle_get_export(
         )));
     }
     let owner_id = user.sub;
+    let pool = crate::db::pool_of(&db);
 
-    let bytes = build_workbook(&pool, owner_id, year, month).await?;
+    let bytes = build_workbook(pool, owner_id, year, month).await?;
 
     let filename = format!("finance-{:04}-{:02}.xlsx", year, month);
     let disposition = format!("attachment; filename=\"{}\"", filename);

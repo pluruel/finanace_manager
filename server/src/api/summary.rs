@@ -3,8 +3,8 @@ use axum::{
     Json,
 };
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -53,10 +53,11 @@ pub struct SummaryResponse {
 /// 지출 카테고리(`kind='expense'`) 만 반환한다. 수입은 별도 엔드포인트(`/api/summary/income`).
 /// amount = -SUM(t.amount) 로 양수화 (저장상 지출은 음수).
 pub async fn handle_get_summary(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path((year, month)): Path<(i32, i32)>,
 ) -> AppResult<Json<SummaryResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     let rows = sqlx::query!(
@@ -82,7 +83,7 @@ pub async fn handle_get_summary(
         year,
         month,
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let mut actor_order: Vec<Option<Uuid>> = Vec::new();

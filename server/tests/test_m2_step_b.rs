@@ -7,6 +7,8 @@
 /// 5. payment_method_cross_actor_merge_rejected
 /// 6. settlement_unchanged_after_merge
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -17,6 +19,7 @@ use finance_manager::import::normalize::to_norm_key;
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -80,7 +83,7 @@ async fn insert_batch(pool: &PgPool, owner_id: Uuid, suffix: &str) -> Uuid {
 
 /// Build a test router that wires the aliases + settlement + categories endpoints
 /// with a synthetic authenticated user.
-fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -108,7 +111,7 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/settlement/:year/:month",
             routing::get(finance_manager::api::settlement::handle_get_settlement),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -125,9 +128,11 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
 /// Seed two merchants. Transactions reference the source. After merge via
 /// POST /api/aliases, all transactions must point to the target, and the
 /// source merchant must be deleted (orphan_deleted=true).
-#[sqlx::test(migrations = "./migrations")]
-async fn merge_merchant_remaps_transactions(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn merge_merchant_remaps_transactions() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed source merchant "이 마트" (with space) and target "이마트" (no space).
@@ -212,7 +217,7 @@ async fn merge_merchant_remaps_transactions(pool: PgPool) {
     .unwrap();
 
     // POST /api/aliases to merge.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "merchant",
         "raw_text": "이 마트",
@@ -266,9 +271,11 @@ async fn merge_merchant_remaps_transactions(pool: PgPool) {
 
 // ── Test 2: merge_product_remaps_product_id ───────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn merge_product_remaps_product_id(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn merge_product_remaps_product_id() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed merchant for FK.
@@ -363,7 +370,7 @@ async fn merge_product_remaps_product_id(pool: PgPool) {
     .unwrap();
 
     // POST /api/aliases to merge.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "product",
         "raw_text": "조닌끼안티",
@@ -408,22 +415,24 @@ async fn merge_product_remaps_product_id(pool: PgPool) {
 // ── Test 3: confirm_rejects_deduction_category ────────────────────────────────
 
 /// The "차감" category must be rejected by POST /api/entities/category/:id/confirm.
-#[sqlx::test(migrations = "./migrations")]
-async fn confirm_rejects_deduction_category(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn confirm_rejects_deduction_category() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
     // Find the 차감 category id.
     let chagang_id: Uuid = sqlx::query_scalar!(
         r#"SELECT id FROM categories WHERE owner_id = $1 AND name = '차감'"#,
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/entities/category/{}/confirm", chagang_id))
@@ -441,9 +450,11 @@ async fn confirm_rejects_deduction_category(pool: PgPool) {
 
 /// Two tokio tasks attempt to merge the same source merchant into two different
 /// targets simultaneously. Exactly one must succeed (200) and the other must 409.
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_merges_one_winner(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn concurrent_merges_one_winner() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed: source + two targets + supporting entities.
@@ -484,11 +495,11 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
 
     let barrier = Arc::new(Barrier::new(2));
 
-    let pool1 = pool.clone();
+    let db1 = Arc::clone(&db);
     let barrier1 = barrier.clone();
     let oid1 = owner_id;
 
-    let pool2 = pool.clone();
+    let db2 = Arc::clone(&db);
     let barrier2 = barrier.clone();
     let oid2 = owner_id;
 
@@ -504,7 +515,7 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
                 "/api/aliases",
                 routing::post(finance_manager::api::aliases::handle_post_alias),
             )
-            .with_state(pool1.clone())
+            .with_state(db1)
             .layer(middleware::from_fn(
                 move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                     let u = user.clone();
@@ -544,7 +555,7 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
                 "/api/aliases",
                 routing::post(finance_manager::api::aliases::handle_post_alias),
             )
-            .with_state(pool2.clone())
+            .with_state(db2)
             .layer(middleware::from_fn(
                 move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                     let u = user.clone();
@@ -587,9 +598,11 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
 
 // ── Test 5: payment_method_cross_actor_merge_rejected ─────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_method_cross_actor_merge_rejected(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn payment_method_cross_actor_merge_rejected() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed two actors.
@@ -637,7 +650,7 @@ async fn payment_method_cross_actor_merge_rejected(pool: PgPool) {
     .await
     .unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "payment_method",
         "raw_text": "신한엉아",
@@ -682,9 +695,11 @@ async fn payment_method_cross_actor_merge_rejected(pool: PgPool) {
 // ── Test 5b: payment_method_same_actor_merge_allowed ─────────────────────────
 
 /// Merging two payment methods pinned to the same actor must succeed.
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_method_same_actor_merge_allowed(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn payment_method_same_actor_merge_allowed() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     let actor_id: Uuid = sqlx::query_scalar!(
@@ -721,7 +736,7 @@ async fn payment_method_same_actor_merge_allowed(pool: PgPool) {
     .await
     .unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "payment_method",
         "raw_text": "롯데A",
@@ -740,9 +755,11 @@ async fn payment_method_same_actor_merge_allowed(pool: PgPool) {
 // ── Test 5c: payment_method_null_actor_merge_allowed ─────────────────────────
 
 /// Merging where one side has NULL actor_id must be allowed.
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_method_null_actor_merge_allowed(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn payment_method_null_actor_merge_allowed() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     let actor_id: Uuid = sqlx::query_scalar!(
@@ -780,7 +797,7 @@ async fn payment_method_null_actor_merge_allowed(pool: PgPool) {
     .await
     .unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "payment_method",
         "raw_text": "현금X",
@@ -800,9 +817,11 @@ async fn payment_method_null_actor_merge_allowed(pool: PgPool) {
 
 /// Import the golden file, then merge two arbitrary merchants. Verify that
 /// v_monthly_settlement's deducted_amount and settlement_input remain correct.
-#[sqlx::test(migrations = "./migrations")]
-async fn settlement_unchanged_after_merge(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn settlement_unchanged_after_merge() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&pool, owner_id).await;
 
@@ -851,7 +870,7 @@ async fn settlement_unchanged_after_merge(pool: PgPool) {
     }
 
     // Do the merge.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "merchant",
         "raw_text": src_name,
@@ -914,9 +933,11 @@ async fn settlement_unchanged_after_merge(pool: PgPool) {
 // ── Test 7: delete_alias_removes_only_alias_row ───────────────────────────────
 
 /// DELETE /api/aliases/:id must remove the alias row and not touch transactions.
-#[sqlx::test(migrations = "./migrations")]
-async fn delete_alias_removes_only_alias_row(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn delete_alias_removes_only_alias_row() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&pool, owner_id).await;
 
@@ -943,7 +964,7 @@ async fn delete_alias_removes_only_alias_row(pool: PgPool) {
     .unwrap()
     .unwrap_or(0);
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("DELETE")
         .uri(format!("/api/aliases/{}", alias_id))
@@ -976,13 +997,15 @@ async fn delete_alias_removes_only_alias_row(pool: PgPool) {
 
 // ── Test 8: review_queue_returns_pending_items ────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn review_queue_returns_pending_items(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn review_queue_returns_pending_items() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .uri("/api/review-queue?scope=merchant")
         .body(Body::empty())
@@ -1005,9 +1028,11 @@ async fn review_queue_returns_pending_items(pool: PgPool) {
 
 // ── Test 9: confirm_merchant_flips_review_state ───────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn confirm_merchant_flips_review_state(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn confirm_merchant_flips_review_state() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&pool, owner_id).await;
 
@@ -1020,7 +1045,7 @@ async fn confirm_merchant_flips_review_state(pool: PgPool) {
     .await
     .unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/entities/merchant/{}/confirm", merchant_id))
@@ -1050,9 +1075,11 @@ async fn confirm_merchant_flips_review_state(pool: PgPool) {
 /// review_state='pending'. Confirming via POST /api/entities/payment_method/:id/confirm
 /// must flip the row to 'confirmed', and /api/review-queue?scope=payment_method
 /// must drop the row from pending.
-#[sqlx::test(migrations = "./migrations")]
-async fn confirm_payment_method_flips_review_state(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn confirm_payment_method_flips_review_state() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&pool, owner_id).await;
 
@@ -1065,7 +1092,7 @@ async fn confirm_payment_method_flips_review_state(pool: PgPool) {
     .unwrap();
 
     // Confirm.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/entities/payment_method/{}/confirm", pm_id))
@@ -1107,13 +1134,15 @@ async fn confirm_payment_method_flips_review_state(pool: PgPool) {
 
 /// /api/review-queue?scope=payment_method must return the freshly imported
 /// (pending) payment methods after the golden import.
-#[sqlx::test(migrations = "./migrations")]
-async fn review_queue_payment_method_returns_pending(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn review_queue_payment_method_returns_pending() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .uri("/api/review-queue?scope=payment_method")
         .body(Body::empty())

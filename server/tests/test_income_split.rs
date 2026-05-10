@@ -3,20 +3,22 @@
 /// Verifies per-actor income totals, zero-fill for actors with no income,
 /// and the "month" field format.
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 // ── Router ────────────────────────────────────────────────────────────────────
 
-fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -28,7 +30,7 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/summary/income/:year/:month",
             routing::get(finance_manager::api::income::handle_get_income),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -43,25 +45,27 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Happy path: one income transaction for 엉아; 공동 and 아기 should be zero-filled.
-#[sqlx::test(migrations = "./migrations")]
-async fn income_by_actor_one_actor_has_income(pool: PgPool) {
+#[tokio::test]
+async fn income_by_actor_one_actor_has_income() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    let pool = Arc::new(pool);
+    let db = Arc::clone(&t.db);
 
     // Create three ledger actors
     let _actor_gongjong = sqlx::query_scalar!(
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '공동') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
-    let actor_eonga = sqlx::query_scalar!(
+    let actor_eonga: Uuid = sqlx::query_scalar!(
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -69,7 +73,7 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '아기') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -78,7 +82,7 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -89,7 +93,7 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
            RETURNING id"#,
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -104,7 +108,7 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
         batch_id,
         group_id,
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -119,12 +123,12 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
         actor_eonga,
         category_id,
     )
-    .execute(&*pool)
+    .execute(pool)
     .await
     .unwrap();
 
     // Build router and call the endpoint
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
 
     let response = app
         .oneshot(
@@ -184,16 +188,18 @@ async fn income_by_actor_one_actor_has_income(pool: PgPool) {
 }
 
 /// `categories` 필드는 income kind 카테고리만 포함하고 액터 셀 합계가 양수.
-#[sqlx::test(migrations = "./migrations")]
-async fn income_response_includes_categories_breakdown(pool: PgPool) {
+#[tokio::test]
+async fn income_response_includes_categories_breakdown() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    let pool = Arc::new(pool);
+    let db = Arc::clone(&t.db);
 
     let actor_eonga: Uuid = sqlx::query_scalar!(
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -201,7 +207,7 @@ async fn income_response_includes_categories_breakdown(pool: PgPool) {
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -211,7 +217,7 @@ async fn income_response_includes_categories_breakdown(pool: PgPool) {
            RETURNING id"#,
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -222,7 +228,7 @@ async fn income_response_includes_categories_breakdown(pool: PgPool) {
            VALUES ($1, $2, 0, $3, true) RETURNING id"#,
         owner_id, batch_id, group_id,
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -232,11 +238,11 @@ async fn income_response_includes_categories_breakdown(pool: PgPool) {
            VALUES ($1, $2, $3, '2026-02-25', $4, $5, 4500000)"#,
         owner_id, raw_id, group_id, actor_eonga, salary_cat,
     )
-    .execute(&*pool)
+    .execute(pool)
     .await
     .unwrap();
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let response = app
         .oneshot(
             Request::builder()
@@ -265,16 +271,18 @@ async fn income_response_includes_categories_breakdown(pool: PgPool) {
 }
 
 /// expense kind 카테고리는 categories 에 절대 등장하지 않는다.
-#[sqlx::test(migrations = "./migrations")]
-async fn income_categories_exclude_expense_kind(pool: PgPool) {
+#[tokio::test]
+async fn income_categories_exclude_expense_kind() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    let pool = Arc::new(pool);
+    let db = Arc::clone(&t.db);
 
     let actor: Uuid = sqlx::query_scalar!(
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -282,7 +290,7 @@ async fn income_categories_exclude_expense_kind(pool: PgPool) {
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -290,7 +298,7 @@ async fn income_categories_exclude_expense_kind(pool: PgPool) {
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -300,7 +308,7 @@ async fn income_categories_exclude_expense_kind(pool: PgPool) {
            RETURNING id"#,
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -312,7 +320,7 @@ async fn income_categories_exclude_expense_kind(pool: PgPool) {
                VALUES ($1, $2, $3, $4, true) RETURNING id"#,
             owner_id, batch_id, i as i32, group_id,
         )
-        .fetch_one(&*pool)
+        .fetch_one(pool)
         .await
         .unwrap();
 
@@ -322,12 +330,12 @@ async fn income_categories_exclude_expense_kind(pool: PgPool) {
                VALUES ($1, $2, $3, '2026-02-15', $4, $5, $6)"#,
             owner_id, raw_id, group_id, actor, cat, rust_decimal::Decimal::from(*amount),
         )
-        .execute(&*pool)
+        .execute(pool)
         .await
         .unwrap();
     }
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let response = app
         .oneshot(
             Request::builder()
@@ -352,16 +360,18 @@ async fn income_categories_exclude_expense_kind(pool: PgPool) {
 }
 
 /// Expense-only transactions should not count towards income totals.
-#[sqlx::test(migrations = "./migrations")]
-async fn expense_transactions_excluded_from_income(pool: PgPool) {
+#[tokio::test]
+async fn expense_transactions_excluded_from_income() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    let pool = Arc::new(pool);
+    let db = Arc::clone(&t.db);
 
     let _actor: Uuid = sqlx::query_scalar!(
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -369,7 +379,7 @@ async fn expense_transactions_excluded_from_income(pool: PgPool) {
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -379,7 +389,7 @@ async fn expense_transactions_excluded_from_income(pool: PgPool) {
            RETURNING id"#,
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -394,7 +404,7 @@ async fn expense_transactions_excluded_from_income(pool: PgPool) {
         batch_id,
         group_id,
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
 
@@ -408,11 +418,11 @@ async fn expense_transactions_excluded_from_income(pool: PgPool) {
         group_id,
         expense_cat,
     )
-    .execute(&*pool)
+    .execute(pool)
     .await
     .unwrap();
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
 
     let response = app
         .oneshot(

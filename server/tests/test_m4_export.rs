@@ -4,6 +4,8 @@
 /// expected sheets and that the Settlement sheet matches the underlying
 /// v_monthly_settlement values.
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -13,6 +15,7 @@ use calamine::{open_workbook_from_rs, DataType, Reader, Xlsx};
 use finance_manager::auth::AuthUser;
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
+use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::io::Cursor;
@@ -57,7 +60,7 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
     tx.commit().await.unwrap();
 }
 
-fn build_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -69,7 +72,7 @@ fn build_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/export/:year/:month",
             routing::get(finance_manager::api::export::handle_get_export),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -81,13 +84,15 @@ fn build_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
         ))
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn export_returns_valid_xlsx_with_three_sheets(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn export_returns_valid_xlsx_with_three_sheets() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(pool, owner_id).await;
 
-    let app = build_router(pool.clone(), owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .uri("/api/export/2026/2")
         .body(Body::empty())
@@ -131,7 +136,7 @@ async fn export_returns_valid_xlsx_with_three_sheets(pool: PgPool) {
            WHERE owner_id = $1 AND month = '2026-02-01'"#,
         owner_id
     )
-    .fetch_one(&*pool)
+    .fetch_one(pool)
     .await
     .unwrap();
     let live_recognized: f64 = live.r.to_string().parse().unwrap();
@@ -160,11 +165,12 @@ async fn export_returns_valid_xlsx_with_three_sheets(pool: PgPool) {
     assert!(rows > 100, "Transactions sheet should have many rows, got {rows}");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn export_invalid_month_returns_400(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn export_invalid_month_returns_400() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let app = build_router(pool, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_router(db, owner_id);
 
     let req = Request::builder()
         .uri("/api/export/2026/13")
@@ -174,13 +180,14 @@ async fn export_invalid_month_returns_400(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn export_empty_month_returns_xlsx_with_zero_settlement(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn export_empty_month_returns_xlsx_with_zero_settlement() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
     // No import — request a month with no data.
 
-    let app = build_router(pool, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/export/2026/2")
         .body(Body::empty())

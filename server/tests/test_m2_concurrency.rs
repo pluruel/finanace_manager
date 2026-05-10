@@ -4,6 +4,8 @@
 /// pool connection, begins a transaction, calls the relevant insert, and commits.
 /// Post-condition: exactly 1 row exists for the given key.
 
+mod common;
+
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::normalize::to_norm_key;
 use finance_manager::domain::RawRow;
@@ -63,9 +65,10 @@ async fn insert_batch(pool: &PgPool, owner_id: Uuid, suffix: &str) -> Uuid {
 
 /// Two tasks attempt to create the same root category simultaneously.
 /// Exactly 1 row must exist after both commit.
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_category_upsert_no_duplicate(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn concurrent_category_upsert_no_duplicate() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
     let owner_id = Uuid::new_v4();
     let cat_name = format!("concurrency_test_{}", Uuid::new_v4());
 
@@ -127,9 +130,10 @@ async fn concurrent_category_upsert_no_duplicate(pool: PgPool) {
 
 /// Two tasks attempt to create the same product (same merchant, same memo) simultaneously.
 /// Exactly 1 product row must exist after both commit.
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_product_upsert_no_duplicate(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn concurrent_product_upsert_no_duplicate() {
+    let t = common::TestDb::new().await;
+    let pool = Arc::new(t.pool.clone());
     let owner_id = Uuid::new_v4();
 
     // Use a fresh UUID as part of the name — no underscores so normalization is stable.

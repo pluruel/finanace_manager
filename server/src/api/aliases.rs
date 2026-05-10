@@ -13,7 +13,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgConnection, PgPool};
+use sea_orm::DatabaseConnection;
+use sqlx::PgConnection;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -114,10 +115,11 @@ pub struct MergeCandidate {
 }
 
 pub async fn handle_get_review_queue(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(params): Query<ReviewQueueQuery>,
 ) -> AppResult<Json<Vec<ReviewQueueItem>>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
     let mut conn = pool.acquire().await?;
 
@@ -333,10 +335,11 @@ pub struct PostAliasResponse {
 }
 
 pub async fn handle_post_alias(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Json(body): Json<PostAliasBody>,
 ) -> AppResult<Json<PostAliasResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
     let scope = &body.scope;
 
@@ -486,10 +489,11 @@ pub async fn handle_post_alias(
 // ── DELETE /api/aliases/:id ───────────────────────────────────────────────────
 
 pub async fn handle_delete_alias(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path(alias_id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     let result = sqlx::query!(
@@ -513,10 +517,11 @@ pub async fn handle_delete_alias(
 // ── POST /api/entities/:scope/:id/confirm ────────────────────────────────────
 
 pub async fn handle_confirm_entity(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path((scope, entity_id)): Path<(String, Uuid)>,
 ) -> AppResult<Json<Value>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     if scope_meta(&scope).is_none() {

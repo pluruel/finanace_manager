@@ -4,8 +4,8 @@ use axum::{
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -54,10 +54,11 @@ pub struct PriceHistoryResponse {
 /// (with `product_id` set and `unit_price` non-null) appear here. Returns 400
 /// when `product_id` is missing.
 pub async fn handle_get_price_history(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(q): Query<PriceHistoryQuery>,
 ) -> AppResult<Json<PriceHistoryResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
     let product_id = q
         .product_id
@@ -77,7 +78,7 @@ pub async fn handle_get_price_history(
         owner_id,
         product_id,
     )
-    .fetch_optional(&*pool)
+    .fetch_optional(pool)
     .await?
     .ok_or_else(|| AppError::NotFound(format!("product {product_id}")))?;
 
@@ -106,7 +107,7 @@ pub async fn handle_get_price_history(
         q.from as Option<NaiveDate>,
         q.to as Option<NaiveDate>,
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let points: Vec<PricePoint> = rows

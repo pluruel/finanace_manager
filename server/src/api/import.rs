@@ -6,7 +6,7 @@ use axum::{
     Json,
 };
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -39,10 +39,11 @@ fn multipart_err_to_app_err(e: MultipartError) -> AppError {
 /// 3. 단일 트랜잭션 내에서: raw 저장 + alias 매핑 + transactions 생성 + 합계 무결성 검증
 /// 4. tx.commit() — 실패 시 자동 rollback → file_hash 미점유 → 재시도 가능
 pub async fn handle_import(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     mut multipart: Multipart,
 ) -> AppResult<impl IntoResponse> {
+    let pool = crate::db::pool_of(&db);
     // multipart에서 파일 추출
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_name: String = "unknown.xlsx".to_string();

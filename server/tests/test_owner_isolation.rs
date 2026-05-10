@@ -5,6 +5,8 @@
 ///
 /// 테스트 5: error 매핑 (sqlx 23505 → Conflict 409)
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -13,8 +15,10 @@ use axum::{
 use finance_manager::auth::AuthUser;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use finance_manager::import::pipeline::run_pipeline;
+use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -27,7 +31,7 @@ fn load_golden_bytes() -> Vec<u8> {
 }
 
 /// Extension<AuthUser>를 직접 주입해 인증 미들웨어 없이 보호된 라우트를 테스트한다.
-fn build_transactions_router_for_user(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_transactions_router_for_user(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -39,7 +43,7 @@ fn build_transactions_router_for_user(pool: std::sync::Arc<PgPool>, owner_id: Uu
             "/api/transactions",
             routing::get(finance_manager::api::transactions::handle_get_transactions),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -86,20 +90,22 @@ async fn import_for_owner(pool: &PgPool, owner_id: Uuid, bytes: &[u8]) {
     tx.commit().await.unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn transactions_owner_isolation(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn transactions_owner_isolation() {
+    let t = common::TestDb::new().await;
+    let pool = &t.pool;
+    let db = Arc::clone(&t.db);
     let owner_a = Uuid::new_v4();
     let owner_b = Uuid::new_v4();
 
     let bytes = load_golden_bytes();
 
     // 두 owner 모두 같은 데이터 임포트 (file_hash가 다른 owner_id별로 분리됨)
-    import_for_owner(&pool, owner_a, &bytes).await;
-    import_for_owner(&pool, owner_b, &bytes).await;
+    import_for_owner(pool, owner_a, &bytes).await;
+    import_for_owner(pool, owner_b, &bytes).await;
 
     // owner_a 토큰으로 조회
-    let app_a = build_transactions_router_for_user(pool.clone(), owner_a);
+    let app_a = build_transactions_router_for_user(Arc::clone(&db), owner_a);
     let req_a = Request::builder()
         .uri("/api/transactions")
         .body(Body::empty())
@@ -114,7 +120,7 @@ async fn transactions_owner_isolation(pool: PgPool) {
     let total_a = json_a["total"].as_u64().unwrap();
 
     // owner_b 토큰으로 조회
-    let app_b = build_transactions_router_for_user(pool.clone(), owner_b);
+    let app_b = build_transactions_router_for_user(Arc::clone(&db), owner_b);
     let req_b = Request::builder()
         .uri("/api/transactions")
         .body(Body::empty())
@@ -144,7 +150,7 @@ async fn transactions_owner_isolation(pool: PgPool) {
         r#"SELECT id FROM transactions WHERE owner_id = $1 LIMIT 1"#,
         owner_b
     )
-    .fetch_optional(&*pool)
+    .fetch_optional(pool)
     .await
     .unwrap();
 
@@ -169,12 +175,13 @@ async fn transactions_owner_isolation(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn transactions_empty_for_new_owner(pool: PgPool) {
+#[tokio::test]
+async fn transactions_empty_for_new_owner() {
     // 데이터 없는 새 owner → 빈 리스트 반환
-    let pool = std::sync::Arc::new(pool);
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let empty_owner = Uuid::new_v4();
-    let app = build_transactions_router_for_user(pool, empty_owner);
+    let app = build_transactions_router_for_user(db, empty_owner);
 
     let req = Request::builder()
         .uri("/api/transactions")

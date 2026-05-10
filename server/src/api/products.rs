@@ -2,8 +2,8 @@ use axum::{
     extract::{Query, State},
     Json,
 };
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -34,10 +34,11 @@ pub struct ProductItem {
 /// List/search products joined with their merchant. Includes a transaction_count
 /// per product so the UI can prioritize products with actual data.
 pub async fn handle_get_products(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(q): Query<ProductQuery>,
 ) -> AppResult<Json<Vec<ProductItem>>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
     let merchant_filter = q.merchant_id;
     let name_filter: Option<String> = q
@@ -69,7 +70,7 @@ pub async fn handle_get_products(
         merchant_filter,
         name_filter,
     )
-    .fetch_all(&*pool)
+    .fetch_all(pool)
     .await?;
 
     let items = rows

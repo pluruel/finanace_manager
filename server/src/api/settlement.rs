@@ -3,8 +3,8 @@ use axum::{
     Json,
 };
 use rust_decimal::Decimal;
+use sea_orm::DatabaseConnection;
 use serde::Serialize;
-use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::auth::ExtractUser;
@@ -27,10 +27,11 @@ pub struct SettlementResponse {
 /// Queries v_monthly_settlement for the requested month.
 /// Returns zeros (not 404) when no data exists for that month.
 pub async fn handle_get_settlement(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path((year, month)): Path<(i32, i32)>,
 ) -> AppResult<Json<SettlementResponse>> {
+    let pool = crate::db::pool_of(&db);
     let owner_id = user.sub;
 
     // v_monthly_settlement groups by date_trunc('month', occurred_on)::date.
@@ -49,7 +50,7 @@ pub async fn handle_get_settlement(
         year,
         month,
     )
-    .fetch_optional(&*pool)
+    .fetch_optional(pool)
     .await?;
 
     // If no data for that month, return zeros rather than 404.
