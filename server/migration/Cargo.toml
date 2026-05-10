@@ -8,9 +8,14 @@ publish = false
 name = "migration"
 path = "src/lib.rs"
 
+[[bin]]
+name = "migration"
+path = "src/main.rs"
+
 [dependencies]
 async-trait = "0.1"
 sea-orm-migration = { version = "1", features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",
 ] }
+async-std = { version = "1", features = ["attributes", "tokio1"] }
