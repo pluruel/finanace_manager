@@ -11,6 +11,7 @@ mod auth;
 mod config;
 mod db;
 mod domain;
+mod entity;
 mod error;
 mod import;
 

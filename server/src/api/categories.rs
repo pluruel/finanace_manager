@@ -1,11 +1,12 @@
 use axum::{extract::{Path, State}, Json};
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::ExtractUser;
+use crate::entity::{categories, ledger_actors, merchants, payment_methods, prelude::*};
 use crate::error::{AppError, AppResult};
 
 // ── GET /api/categories ──────────────────────────────────────────────────────
@@ -23,38 +24,20 @@ pub async fn handle_get_categories(
     State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
 ) -> AppResult<Json<Vec<CategoryItem>>> {
-    let pool = crate::db::pool_of(&db);
-    let owner_id = user.sub;
+    let rows = Categories::find()
+        .filter(categories::Column::OwnerId.eq(user.sub))
+        .order_by_asc(categories::Column::Kind)
+        .order_by_asc(categories::Column::Name)
+        .all(&*db)
+        .await?;
 
-    let rows = sqlx::query!(
-        r#"
-        SELECT
-            id       AS "id!: Uuid",
-            name     AS "name!: String",
-            kind     AS "kind!: String",
-            review_state AS "review_state!: String",
-            parent_id AS "parent_id?: Uuid"
-        FROM categories
-        WHERE owner_id = $1
-        ORDER BY kind, name
-        "#,
-        owner_id
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let items = rows
-        .into_iter()
-        .map(|r| CategoryItem {
-            id: r.id,
-            name: r.name,
-            kind: r.kind,
-            review_state: r.review_state,
-            parent_id: r.parent_id,
-        })
-        .collect();
-
-    Ok(Json(items))
+    Ok(Json(rows.into_iter().map(|r| CategoryItem {
+        id: r.id,
+        name: r.name,
+        kind: r.kind,
+        review_state: r.review_state,
+        parent_id: r.parent_id,
+    }).collect()))
 }
 
 // ── GET /api/merchants ───────────────────────────────────────────────────────
@@ -70,34 +53,17 @@ pub async fn handle_get_merchants(
     State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
 ) -> AppResult<Json<Vec<MerchantItem>>> {
-    let pool = crate::db::pool_of(&db);
-    let owner_id = user.sub;
+    let rows = Merchants::find()
+        .filter(merchants::Column::OwnerId.eq(user.sub))
+        .order_by_asc(merchants::Column::Name)
+        .all(&*db)
+        .await?;
 
-    let rows = sqlx::query!(
-        r#"
-        SELECT
-            id           AS "id!: Uuid",
-            name         AS "name!: String",
-            review_state AS "review_state!: String"
-        FROM merchants
-        WHERE owner_id = $1
-        ORDER BY name
-        "#,
-        owner_id
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let items = rows
-        .into_iter()
-        .map(|r| MerchantItem {
-            id: r.id,
-            name: r.name,
-            review_state: r.review_state,
-        })
-        .collect();
-
-    Ok(Json(items))
+    Ok(Json(rows.into_iter().map(|r| MerchantItem {
+        id: r.id,
+        name: r.name,
+        review_state: r.review_state,
+    }).collect()))
 }
 
 // ── GET /api/payment-methods ─────────────────────────────────────────────────
@@ -115,39 +81,21 @@ pub async fn handle_get_payment_methods(
     State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
 ) -> AppResult<Json<Vec<PaymentMethodItem>>> {
-    let pool = crate::db::pool_of(&db);
-    let owner_id = user.sub;
+    let rows: Vec<(payment_methods::Model, Option<ledger_actors::Model>)> =
+        PaymentMethods::find()
+            .find_also_related(LedgerActors)
+            .filter(payment_methods::Column::OwnerId.eq(user.sub))
+            .order_by_asc(payment_methods::Column::Name)
+            .all(&*db)
+            .await?;
 
-    let rows = sqlx::query!(
-        r#"
-        SELECT
-            pm.id           AS "id!: Uuid",
-            pm.name         AS "name!: String",
-            pm.actor_id     AS "actor_id?: Uuid",
-            la.name         AS "actor_name?: String",
-            pm.review_state AS "review_state!: String"
-        FROM payment_methods pm
-        LEFT JOIN ledger_actors la ON la.id = pm.actor_id AND la.owner_id = pm.owner_id
-        WHERE pm.owner_id = $1
-        ORDER BY pm.name
-        "#,
-        owner_id
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let items = rows
-        .into_iter()
-        .map(|r| PaymentMethodItem {
-            id: r.id,
-            name: r.name,
-            actor_id: r.actor_id,
-            actor_name: r.actor_name,
-            review_state: r.review_state,
-        })
-        .collect();
-
-    Ok(Json(items))
+    Ok(Json(rows.into_iter().map(|(pm, actor)| PaymentMethodItem {
+        id: pm.id,
+        name: pm.name,
+        actor_id: pm.actor_id,
+        actor_name: actor.map(|a| a.name),
+        review_state: pm.review_state,
+    }).collect()))
 }
 
 // ── PATCH /api/categories/:id/kind ───────────────────────────────────────────
@@ -171,45 +119,32 @@ pub async fn handle_patch_category_kind(
     Path(category_id): Path<Uuid>,
     Json(body): Json<PatchCategoryKindBody>,
 ) -> AppResult<Json<PatchCategoryKindResponse>> {
-    let pool = crate::db::pool_of(&db);
-    let owner_id = user.sub;
-
     if body.kind != "income" && body.kind != "expense" {
         return Err(AppError::BadRequest(
             "kind must be 'income' or 'expense'".into(),
         ));
     }
 
-    let row = sqlx::query!(
-        r#"SELECT name AS "name!: String" FROM categories WHERE id = $1 AND owner_id = $2"#,
-        category_id,
-        owner_id
-    )
-    .fetch_optional(pool)
-    .await?;
+    let cat = Categories::find()
+        .filter(categories::Column::Id.eq(category_id))
+        .filter(categories::Column::OwnerId.eq(user.sub))
+        .one(&*db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("category not found".into()))?;
 
-    let Some(found) = row else {
-        return Err(AppError::NotFound("category not found".into()));
-    };
-    if found.name == "차감" {
+    if cat.name == "차감" {
         return Err(AppError::Conflict(json!({
             "error": "protected_category",
             "message": "차감 is a protected category and cannot be re-typed",
         })));
     }
 
-    sqlx::query!(
-        r#"UPDATE categories SET kind = $1 WHERE id = $2 AND owner_id = $3"#,
-        body.kind,
-        category_id,
-        owner_id
-    )
-    .execute(pool)
-    .await?;
+    let mut active: categories::ActiveModel = cat.into();
+    active.kind = Set(body.kind.clone());
+    active.update(&*db).await?;
 
     Ok(Json(PatchCategoryKindResponse {
         id: category_id,
         kind: body.kind,
     }))
 }
-
