@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -260,7 +260,7 @@ export function TransactionsTable({
   const router = useRouter();
   const [expanded, setExpanded] = useState<ExpandedState>({});
 
-  const tableData = buildTableData(items);
+  const tableData = useMemo(() => buildTableData(items), [items]);
 
   const table = useReactTable({
     data: tableData,
