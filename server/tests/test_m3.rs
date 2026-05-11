@@ -6,18 +6,26 @@
 ///    Acceptance: 6 occurrences of 고덕방 아이스아메리카노 at 3,400 KRW.
 /// 3. GET /api/merchant-stats?merchant_id= — monthly per-merchant totals,
 ///    with optional memo_less_only filter (167 memo-less Feb rows).
+
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -31,7 +39,7 @@ fn load_golden_bytes() -> Vec<u8> {
     std::fs::read(path).expect("Failed to read golden xlsx fixture")
 }
 
-async fn do_import(pool: &PgPool, owner_id: Uuid) {
+async fn do_import(t: &common::TestDb, owner_id: Uuid) {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
@@ -44,28 +52,27 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
     let raw_rows = parse_xlsx(&bytes, &sheet_name).unwrap();
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await.unwrap();
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id"#,
-        owner_id,
-        filename,
-        hash_vec,
-        year,
-        month,
-        row_count,
-    )
-    .fetch_one(&mut *tx)
+    let txn = t.db.begin().await.unwrap();
+    let batch_id = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
     .await
-    .unwrap();
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+    .unwrap()
+    .last_insert_id;
+    run_pipeline(&txn, owner_id, batch_id, raw_rows)
         .await
         .unwrap();
-    tx.commit().await.unwrap();
+    txn.commit().await.unwrap();
 }
 
-fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -85,7 +92,7 @@ fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/merchant-stats",
             routing::get(finance_manager::api::merchant_stats::handle_get_merchant_stats),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -106,36 +113,33 @@ async fn fetch_json(app: Router, uri: &str) -> (StatusCode, Value) {
     (status, json)
 }
 
-async fn lookup_id(pool: &PgPool, owner_id: Uuid, table: &str, name: &str) -> Uuid {
-    // Static SQL per table to satisfy sqlx::query_scalar!.
-    match table {
-        "products" => sqlx::query_scalar!(
-            r#"SELECT id AS "id!: Uuid" FROM products WHERE owner_id = $1 AND name = $2"#,
-            owner_id, name,
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or_else(|e| panic!("product '{name}' not found: {e}")),
-        "merchants" => sqlx::query_scalar!(
-            r#"SELECT id AS "id!: Uuid" FROM merchants WHERE owner_id = $1 AND name = $2"#,
-            owner_id, name,
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or_else(|e| panic!("merchant '{name}' not found: {e}")),
-        _ => panic!("unsupported table: {table}"),
-    }
+#[derive(FromQueryResult)]
+struct IdRow { id: Uuid }
+
+async fn lookup_id(db: &sea_orm::DatabaseConnection, owner_id: Uuid, table: &str, name: &str) -> Uuid {
+    let sql = format!("SELECT id FROM {table} WHERE owner_id = $1 AND name = $2");
+    IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        &sql,
+        [owner_id.into(), name.into()],
+    ))
+    .one(db)
+    .await
+    .unwrap_or_else(|e| panic!("lookup failed for {table} '{name}': {e}"))
+    .unwrap_or_else(|| panic!("{table} '{name}' not found"))
+    .id
 }
 
 // ── Test: GET /api/products ───────────────────────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn products_list_after_import(pool: PgPool) {
+#[tokio::test]
+async fn products_list_after_import() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc.clone(), owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let (status, json) = fetch_json(app, "/api/products").await;
     assert_eq!(status, StatusCode::OK, "products 200");
 
@@ -157,14 +161,15 @@ async fn products_list_after_import(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn products_filter_by_merchant_and_q(pool: PgPool) {
+#[tokio::test]
+async fn products_filter_by_merchant_and_q() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
-    let merchant_id = lookup_id(&pool, owner_id, "merchants", "고덕방").await;
+    do_import(&t, owner_id).await;
+    let merchant_id = lookup_id(&*t.db, owner_id, "merchants", "고덕방").await;
 
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc.clone(), owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let (status, json) =
         fetch_json(app, &format!("/api/products?merchant_id={merchant_id}")).await;
     assert_eq!(status, StatusCode::OK);
@@ -181,7 +186,7 @@ async fn products_filter_by_merchant_and_q(pool: PgPool) {
     );
 
     // q filter — case-insensitive substring on normalized name.
-    let app = build_test_router(pool_arc, owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let (status, json) = fetch_json(app, "/api/products?q=아이스").await;
     assert_eq!(status, StatusCode::OK);
     let arr = json.as_array().unwrap();
@@ -197,14 +202,15 @@ async fn products_filter_by_merchant_and_q(pool: PgPool) {
 // ── Test: GET /api/price-history ──────────────────────────────────────────────
 
 /// PLAN §6 M3 acceptance criteria: 고덕방 아이스아메리카노 → 6 points all 3,400 KRW.
-#[sqlx::test(migrations = "./migrations")]
-async fn price_history_americano_six_at_3400(pool: PgPool) {
+#[tokio::test]
+async fn price_history_americano_six_at_3400() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
-    let product_id = lookup_id(&pool, owner_id, "products", "아이스아메리카노").await;
+    do_import(&t, owner_id).await;
+    let product_id = lookup_id(&*t.db, owner_id, "products", "아이스아메리카노").await;
 
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(db, owner_id);
     let (status, json) =
         fetch_json(app, &format!("/api/price-history?product_id={product_id}")).await;
     assert_eq!(status, StatusCode::OK, "price-history 200");
@@ -236,20 +242,22 @@ async fn price_history_americano_six_at_3400(pool: PgPool) {
     assert_eq!(avg, Decimal::new(3400, 0));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn price_history_missing_product_id_returns_400(pool: PgPool) {
+#[tokio::test]
+async fn price_history_missing_product_id_returns_400() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(db, owner_id);
     let (status, _) = fetch_json(app, "/api/price-history").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn price_history_unknown_product_returns_404(pool: PgPool) {
+#[tokio::test]
+async fn price_history_unknown_product_returns_404() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(db, owner_id);
     let bogus = Uuid::new_v4();
     let (status, _) = fetch_json(app, &format!("/api/price-history?product_id={bogus}")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -257,14 +265,15 @@ async fn price_history_unknown_product_returns_404(pool: PgPool) {
 
 // ── Test: GET /api/merchant-stats ─────────────────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn merchant_stats_godeokbang_feb(pool: PgPool) {
+#[tokio::test]
+async fn merchant_stats_godeokbang_feb() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
-    let merchant_id = lookup_id(&pool, owner_id, "merchants", "고덕방").await;
+    do_import(&t, owner_id).await;
+    let merchant_id = lookup_id(&*t.db, owner_id, "merchants", "고덕방").await;
 
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(db, owner_id);
     let (status, json) = fetch_json(
         app,
         &format!("/api/merchant-stats?merchant_id={merchant_id}"),
@@ -287,24 +296,32 @@ async fn merchant_stats_godeokbang_feb(pool: PgPool) {
 
 /// PLAN §6 M3 acceptance: the 167 memo-less Feb rows are surfaced via the
 /// memo_less_only filter. Sum across all merchants must equal 167.
-#[sqlx::test(migrations = "./migrations")]
-async fn merchant_stats_memo_less_only_total_matches_golden(pool: PgPool) {
+#[derive(FromQueryResult)]
+struct CountRow { c: i64 }
+
+#[tokio::test]
+async fn merchant_stats_memo_less_only_total_matches_golden() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Fetch every merchant id, sum memo_less_count across all of them.
-    let merchant_ids: Vec<Uuid> = sqlx::query_scalar!(
-        r#"SELECT id AS "id!: Uuid" FROM merchants WHERE owner_id = $1"#,
-        owner_id
-    )
-    .fetch_all(&pool)
+    let merchant_ids: Vec<Uuid> = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id FROM merchants WHERE owner_id = $1"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .into_iter()
+    .map(|r| r.id)
+    .collect();
 
-    let pool_arc = std::sync::Arc::new(pool.clone());
+    let db = Arc::clone(&t.db);
     let mut total_memo_less: i64 = 0;
     for mid in merchant_ids {
-        let app = build_test_router(pool_arc.clone(), owner_id);
+        let app = build_test_router(Arc::clone(&db), owner_id);
         let (status, json) = fetch_json(
             app,
             &format!("/api/merchant-stats?merchant_id={mid}&memo_less_only=true"),
@@ -320,17 +337,20 @@ async fn merchant_stats_memo_less_only_total_matches_golden(pool: PgPool) {
     // Endpoint also filters by categories.kind='expense' (income rows like 급여/회수
     // are excluded from merchant stats), so the anchor must mirror that filter or
     // drift the moment the heuristic flags any merchant-attributed row as income.
-    let direct: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "n!: i64"
+    let direct: i64 = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c
            FROM transactions t
            JOIN categories c ON c.id = t.category_id AND c.owner_id = t.owner_id
            WHERE t.owner_id = $1 AND t.product_id IS NULL AND t.merchant_id IS NOT NULL
              AND c.kind = 'expense'"#,
-        owner_id
-    )
-    .fetch_one(&pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .c;
 
     assert_eq!(
         total_memo_less, direct,
@@ -344,20 +364,22 @@ async fn merchant_stats_memo_less_only_total_matches_golden(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn merchant_stats_missing_merchant_id_returns_400(pool: PgPool) {
+#[tokio::test]
+async fn merchant_stats_missing_merchant_id_returns_400() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(db, owner_id);
     let (status, _) = fetch_json(app, "/api/merchant-stats").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn merchant_stats_unknown_merchant_returns_404(pool: PgPool) {
+#[tokio::test]
+async fn merchant_stats_unknown_merchant_returns_404() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let pool_arc = std::sync::Arc::new(pool);
-    let app = build_test_router(pool_arc, owner_id);
+    let db = Arc::clone(&t.db);
+    let app = build_test_router(db, owner_id);
     let bogus = Uuid::new_v4();
     let (status, _) =
         fetch_json(app, &format!("/api/merchant-stats?merchant_id={bogus}")).await;

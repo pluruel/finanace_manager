@@ -3,8 +3,8 @@ use axum::{
     Json,
 };
 use rust_decimal::Decimal;
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::Serialize;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -48,26 +48,37 @@ pub struct SummaryResponse {
     pub actors: Vec<ActorRef>,
 }
 
+#[derive(FromQueryResult)]
+struct SummaryRow {
+    category_id: Uuid,
+    category_name: String,
+    kind: String,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    amount: Decimal,
+}
+
 /// GET /api/summary/:year/:month
 ///
 /// 지출 카테고리(`kind='expense'`) 만 반환한다. 수입은 별도 엔드포인트(`/api/summary/income`).
 /// amount = -SUM(t.amount) 로 양수화 (저장상 지출은 음수).
 pub async fn handle_get_summary(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path((year, month)): Path<(i32, i32)>,
 ) -> AppResult<Json<SummaryResponse>> {
     let owner_id = user.sub;
 
-    let rows = sqlx::query!(
+    let rows = SummaryRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            c.id        AS "category_id!: Uuid",
-            c.name      AS "category_name!: String",
-            c.kind      AS "kind!: String",
-            a.id        AS "actor_id?: Uuid",
-            a.name      AS "actor_name?: String",
-            (-SUM(t.amount))::numeric(15,2) AS "amount!: Decimal"
+            c.id        AS category_id,
+            c.name      AS category_name,
+            c.kind      AS kind,
+            a.id        AS actor_id,
+            a.name      AS actor_name,
+            (-SUM(t.amount))::numeric(15,2) AS amount
         FROM transactions t
         JOIN categories c         ON c.id = t.category_id AND c.owner_id = t.owner_id
         LEFT JOIN ledger_actors a ON a.id = t.actor_id    AND a.owner_id = t.owner_id
@@ -78,11 +89,9 @@ pub async fn handle_get_summary(
         GROUP BY c.id, c.name, c.kind, a.id, a.name
         ORDER BY c.name, a.name
         "#,
-        owner_id,
-        year,
-        month,
-    )
-    .fetch_all(&*pool)
+        [owner_id.into(), year.into(), month.into()],
+    ))
+    .all(&*db)
     .await?;
 
     let mut actor_order: Vec<Option<Uuid>> = Vec::new();

@@ -4,8 +4,8 @@ use axum::{
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -48,13 +48,33 @@ pub struct PriceHistoryResponse {
     pub avg_unit_price: Option<Decimal>,
 }
 
+#[derive(FromQueryResult)]
+struct ProductRow {
+    id: Uuid,
+    name: String,
+    merchant_id: Option<Uuid>,
+    merchant_name: Option<String>,
+}
+
+#[derive(FromQueryResult)]
+struct PriceRow {
+    id: Uuid,
+    occurred_on: NaiveDate,
+    unit_price: Decimal,
+    quantity: Option<Decimal>,
+    amount: Decimal,
+    merchant_id: Option<Uuid>,
+    merchant_name: Option<String>,
+    memo: Option<String>,
+}
+
 /// GET /api/price-history?product_id=&from=&to=
 ///
 /// Unit-price time series for a single product. Only memo-bearing transactions
 /// (with `product_id` set and `unit_price` non-null) appear here. Returns 400
 /// when `product_id` is missing.
 pub async fn handle_get_price_history(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(q): Query<PriceHistoryQuery>,
 ) -> AppResult<Json<PriceHistoryResponse>> {
@@ -63,34 +83,35 @@ pub async fn handle_get_price_history(
         .product_id
         .ok_or_else(|| AppError::BadRequest("product_id is required".into()))?;
 
-    let product = sqlx::query!(
+    let product = ProductRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            p.id          AS "id!: Uuid",
-            p.name        AS "name!: String",
-            p.merchant_id AS "merchant_id?: Uuid",
-            m.name        AS "merchant_name?: String"
+            p.id          AS id,
+            p.name        AS name,
+            p.merchant_id AS merchant_id,
+            m.name        AS merchant_name
         FROM products p
         LEFT JOIN merchants m ON m.id = p.merchant_id AND m.owner_id = p.owner_id
         WHERE p.owner_id = $1 AND p.id = $2
         "#,
-        owner_id,
-        product_id,
-    )
-    .fetch_optional(&*pool)
+        [owner_id.into(), product_id.into()],
+    ))
+    .one(&*db)
     .await?
     .ok_or_else(|| AppError::NotFound(format!("product {product_id}")))?;
 
-    let rows = sqlx::query!(
+    let rows = PriceRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            t.id           AS "id!: Uuid",
-            t.occurred_on  AS "occurred_on!: NaiveDate",
-            t.unit_price   AS "unit_price!: Decimal",
-            t.quantity     AS "quantity?: Decimal",
-            t.amount       AS "amount!: Decimal",
-            t.merchant_id  AS "merchant_id?: Uuid",
-            m.name         AS "merchant_name?: String",
+            t.id           AS id,
+            t.occurred_on  AS occurred_on,
+            t.unit_price   AS unit_price,
+            t.quantity     AS quantity,
+            t.amount       AS amount,
+            t.merchant_id  AS merchant_id,
+            m.name         AS merchant_name,
             t.memo
         FROM transactions t
         LEFT JOIN merchants m ON m.id = t.merchant_id AND m.owner_id = t.owner_id
@@ -101,12 +122,14 @@ pub async fn handle_get_price_history(
           AND ($4::date IS NULL OR t.occurred_on <= $4)
         ORDER BY t.occurred_on, t.id
         "#,
-        owner_id,
-        product_id,
-        q.from as Option<NaiveDate>,
-        q.to as Option<NaiveDate>,
-    )
-    .fetch_all(&*pool)
+        [
+            owner_id.into(),
+            product_id.into(),
+            q.from.into(),
+            q.to.into(),
+        ],
+    ))
+    .all(&*db)
     .await?;
 
     let points: Vec<PricePoint> = rows

@@ -4,10 +4,15 @@
 /// pool connection, begins a transaction, calls the relevant insert, and commits.
 /// Post-condition: exactly 1 row exists for the given key.
 
+mod common;
+
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::normalize::to_norm_key;
 use finance_manager::domain::RawRow;
-use sqlx::PgPool;
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, EntityTrait, FromQueryResult, Statement, TransactionTrait,
+};
 use std::sync::Arc;
 use tokio::sync::Barrier;
 use uuid::Uuid;
@@ -44,65 +49,68 @@ fn make_raw_row(
 }
 
 /// Insert a throwaway import_batch row and return its id.
-async fn insert_batch(pool: &PgPool, owner_id: Uuid, suffix: &str) -> Uuid {
+async fn insert_batch(db: &sea_orm::DatabaseConnection, owner_id: Uuid, suffix: &str) -> Uuid {
     let hash = format!("fake-hash-{}-{}", owner_id, suffix).into_bytes();
-    sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 1, 1)
-           RETURNING id"#,
-        owner_id,
-        format!("test_{}.xlsx", suffix),
-        hash,
-    )
-    .fetch_one(pool)
+    ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(format!("test_{}.xlsx", suffix)),
+        file_hash: Set(hash),
+        year: Set(2026),
+        month: Set(1),
+        row_count: Set(1),
+        ..Default::default()
+    })
+    .exec(db)
     .await
     .unwrap()
+    .last_insert_id
 }
 
 // ── Test: concurrent category upsert ─────────────────────────────────────────
 
 /// Two tasks attempt to create the same root category simultaneously.
 /// Exactly 1 row must exist after both commit.
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_category_upsert_no_duplicate(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn concurrent_category_upsert_no_duplicate() {
+    let t = common::TestDb::new().await;
+    let db = t.db.clone(); // Arc<DatabaseConnection>
     let owner_id = Uuid::new_v4();
     let cat_name = format!("concurrency_test_{}", Uuid::new_v4());
 
     let barrier = Arc::new(Barrier::new(2));
 
-    let pool1 = pool.clone();
+    let db1 = db.clone();
     let barrier1 = barrier.clone();
     let cat1 = cat_name.clone();
     let oid1 = owner_id;
 
-    let pool2 = pool.clone();
+    let db2 = db.clone();
     let barrier2 = barrier.clone();
     let cat2 = cat_name.clone();
     let oid2 = owner_id;
 
     let h1 = tokio::spawn(async move {
-        let batch_id = insert_batch(&pool1, oid1, "c1").await;
+        let batch_id = insert_batch(&db1, oid1, "c1").await;
         let group_id = Uuid::new_v4();
         let row = make_raw_row(Some(cat1), None, None, group_id);
 
         // Wait at the barrier so both tasks start the transaction at the same instant.
         barrier1.wait().await; // line: real concurrency starts here
 
-        let mut tx = pool1.begin().await.unwrap();
-        run_pipeline(&mut *tx, oid1, batch_id, vec![row]).await.unwrap();
+        let tx = db1.begin().await.unwrap();
+        run_pipeline(&tx, oid1, batch_id, vec![row]).await.unwrap();
         tx.commit().await.unwrap();
     });
 
     let h2 = tokio::spawn(async move {
-        let batch_id = insert_batch(&pool2, oid2, "c2").await;
+        let batch_id = insert_batch(&db2, oid2, "c2").await;
         let group_id = Uuid::new_v4();
         let row = make_raw_row(Some(cat2), None, None, group_id);
 
         barrier2.wait().await; // line: real concurrency starts here
 
-        let mut tx = pool2.begin().await.unwrap();
-        run_pipeline(&mut *tx, oid2, batch_id, vec![row]).await.unwrap();
+        let tx = db2.begin().await.unwrap();
+        run_pipeline(&tx, oid2, batch_id, vec![row]).await.unwrap();
         tx.commit().await.unwrap();
     });
 
@@ -110,15 +118,19 @@ async fn concurrent_category_upsert_no_duplicate(pool: PgPool) {
     h2.await.unwrap();
 
     let norm = to_norm_key(&cat_name);
-    let count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM categories WHERE owner_id = $1 AND name = $2 AND parent_id IS NULL"#,
-        owner_id,
-        norm,
-    )
-    .fetch_one(&*pool)
+
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM categories WHERE owner_id = $1 AND name = $2 AND parent_id IS NULL"#,
+        [owner_id.into(), norm.into()],
+    ))
+    .one(&*t.db)
     .await
     .unwrap()
-    .unwrap_or(0);
+    .unwrap();
+    let count = row.c;
 
     assert_eq!(count, 1, "Expected exactly 1 category row, got {}", count);
 }
@@ -127,9 +139,10 @@ async fn concurrent_category_upsert_no_duplicate(pool: PgPool) {
 
 /// Two tasks attempt to create the same product (same merchant, same memo) simultaneously.
 /// Exactly 1 product row must exist after both commit.
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_product_upsert_no_duplicate(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn concurrent_product_upsert_no_duplicate() {
+    let t = common::TestDb::new().await;
+    let db = t.db.clone(); // Arc<DatabaseConnection>
     let owner_id = Uuid::new_v4();
 
     // Use a fresh UUID as part of the name — no underscores so normalization is stable.
@@ -141,14 +154,14 @@ async fn concurrent_product_upsert_no_duplicate(pool: PgPool) {
 
     let barrier = Arc::new(Barrier::new(2));
 
-    let pool1 = pool.clone();
+    let db1 = db.clone();
     let barrier1 = barrier.clone();
     let memo1 = memo.clone();
     let cat1 = category_text.clone();
     let merch1 = merchant_text.clone();
     let oid1 = owner_id;
 
-    let pool2 = pool.clone();
+    let db2 = db.clone();
     let barrier2 = barrier.clone();
     let memo2 = memo.clone();
     let cat2 = category_text.clone();
@@ -156,26 +169,26 @@ async fn concurrent_product_upsert_no_duplicate(pool: PgPool) {
     let oid2 = owner_id;
 
     let h1 = tokio::spawn(async move {
-        let batch_id = insert_batch(&pool1, oid1, "p1").await;
+        let batch_id = insert_batch(&db1, oid1, "p1").await;
         let group_id = Uuid::new_v4();
         let row = make_raw_row(Some(cat1), Some(merch1), Some(memo1), group_id);
 
         barrier1.wait().await; // line: real concurrency starts here
 
-        let mut tx = pool1.begin().await.unwrap();
-        run_pipeline(&mut *tx, oid1, batch_id, vec![row]).await.unwrap();
+        let tx = db1.begin().await.unwrap();
+        run_pipeline(&tx, oid1, batch_id, vec![row]).await.unwrap();
         tx.commit().await.unwrap();
     });
 
     let h2 = tokio::spawn(async move {
-        let batch_id = insert_batch(&pool2, oid2, "p2").await;
+        let batch_id = insert_batch(&db2, oid2, "p2").await;
         let group_id = Uuid::new_v4();
         let row = make_raw_row(Some(cat2), Some(merch2), Some(memo2), group_id);
 
         barrier2.wait().await; // line: real concurrency starts here
 
-        let mut tx = pool2.begin().await.unwrap();
-        run_pipeline(&mut *tx, oid2, batch_id, vec![row]).await.unwrap();
+        let tx = db2.begin().await.unwrap();
+        run_pipeline(&tx, oid2, batch_id, vec![row]).await.unwrap();
         tx.commit().await.unwrap();
     });
 
@@ -184,15 +197,19 @@ async fn concurrent_product_upsert_no_duplicate(pool: PgPool) {
 
     // Verify exactly 1 product row exists (merchant_id resolved via alias table).
     let norm_memo = to_norm_key(&memo);
-    let count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM products WHERE owner_id = $1 AND name = $2"#,
-        owner_id,
-        norm_memo,
-    )
-    .fetch_one(&*pool)
+
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM products WHERE owner_id = $1 AND name = $2"#,
+        [owner_id.into(), norm_memo.into()],
+    ))
+    .one(&*t.db)
     .await
     .unwrap()
-    .unwrap_or(0);
+    .unwrap();
+    let count = row.c;
 
     assert_eq!(count, 1, "Expected exactly 1 product row, got {}", count);
 }

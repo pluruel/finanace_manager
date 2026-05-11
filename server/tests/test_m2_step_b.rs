@@ -7,18 +7,24 @@
 /// 5. payment_method_cross_actor_merge_rejected
 /// 6. settlement_unchanged_after_merge
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::normalize::to_norm_key;
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
+use sea_orm::{
+    ActiveValue::Set, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
+    FromQueryResult, Statement, TransactionTrait,
+};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::Barrier;
 use tower::ServiceExt;
@@ -34,7 +40,7 @@ fn load_golden_bytes() -> Vec<u8> {
     std::fs::read(path).expect("Failed to read golden xlsx fixture")
 }
 
-async fn do_import(pool: &PgPool, owner_id: Uuid) {
+async fn do_import(t: &common::TestDb, owner_id: Uuid) {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
@@ -47,40 +53,48 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
     let raw_rows = parse_xlsx(&bytes, &sheet_name).unwrap();
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await.unwrap();
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"#,
-        owner_id, filename, hash_vec, year, month, row_count,
-    )
-    .fetch_one(&mut *tx)
+    let txn = t.db.begin().await.unwrap();
+    let batch_id = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
     .await
-    .unwrap();
+    .unwrap()
+    .last_insert_id;
 
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+    run_pipeline(&txn, owner_id, batch_id, raw_rows)
         .await
         .unwrap();
-    tx.commit().await.unwrap();
+    txn.commit().await.unwrap();
 }
 
 /// Insert a throwaway import_batch row and return its id.
-async fn insert_batch(pool: &PgPool, owner_id: Uuid, suffix: &str) -> Uuid {
+async fn insert_batch(db: &sea_orm::DatabaseConnection, owner_id: Uuid, suffix: &str) -> Uuid {
     let hash = format!("fake-hash-{}-{}", owner_id, suffix).into_bytes();
-    sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 1, 1) RETURNING id"#,
-        owner_id,
-        format!("test_{}.xlsx", suffix),
-        hash,
-    )
-    .fetch_one(pool)
+    ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(format!("test_{}.xlsx", suffix)),
+        file_hash: Set(hash),
+        year: Set(2026),
+        month: Set(1),
+        row_count: Set(1),
+        ..Default::default()
+    })
+    .exec(db)
     .await
     .unwrap()
+    .last_insert_id
 }
 
 /// Build a test router that wires the aliases + settlement + categories endpoints
 /// with a synthetic authenticated user.
-fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -108,7 +122,7 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/settlement/:year/:month",
             routing::get(finance_manager::api::settlement::handle_get_settlement),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -125,94 +139,91 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
 /// Seed two merchants. Transactions reference the source. After merge via
 /// POST /api/aliases, all transactions must point to the target, and the
 /// source merchant must be deleted (orphan_deleted=true).
-#[sqlx::test(migrations = "./migrations")]
-async fn merge_merchant_remaps_transactions(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[derive(FromQueryResult)]
+struct IdRow { id: Uuid }
+
+#[derive(FromQueryResult)]
+struct CountRow { c: i64 }
+
+#[derive(FromQueryResult)]
+struct BoolRow { e: bool }
+
+#[derive(FromQueryResult)]
+struct StateRow { review_state: String }
+
+#[tokio::test]
+async fn merge_merchant_remaps_transactions() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed source merchant "이 마트" (with space) and target "이마트" (no space).
-    let src_merchant_id: Uuid = sqlx::query_scalar!(
+    let src_merchant_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, '이 마트', 'pending') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let tgt_merchant_id: Uuid = sqlx::query_scalar!(
+    let tgt_merchant_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, '이마트', 'confirmed') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     // Seed a category and actor for FK satisfaction.
-    let cat_id: Uuid = sqlx::query_scalar!(
+    let cat_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO categories (owner_id, name, kind, review_state) VALUES ($1, '식료품', 'expense', 'pending') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let actor_id: Uuid = sqlx::query_scalar!(
+    let actor_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '공동') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let pm_id: Uuid = sqlx::query_scalar!(
+    let pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name) VALUES ($1, '신한') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let batch_id = insert_batch(&pool, owner_id, "t1").await;
+    let batch_id = insert_batch(&*db, owner_id, "t1").await;
 
     // Seed 3 transactions referencing the source merchant.
-    for i in 0..3_i32 {
-        let raw_id: Uuid = sqlx::query_scalar!(
+    for i in 0..3_i64 {
+        let raw_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
             r#"INSERT INTO transactions_raw
                (owner_id, import_batch_id, row_index, group_id, is_group_header,
                 occurred_on, merchant_text, line_amount)
                VALUES ($1, $2, $3, gen_random_uuid(), false, '2026-02-01', '이 마트', 10000)
                RETURNING id"#,
-            owner_id, batch_id, i
-        )
-        .fetch_one(&*pool)
-        .await
-        .unwrap();
+            [owner_id.into(), batch_id.into(), i.into()],
+        )).one(&*db).await.unwrap().unwrap().id;
 
-        sqlx::query!(
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
             r#"INSERT INTO transactions
                (owner_id, raw_id, group_id, occurred_on, merchant_id, actor_id,
                 category_id, payment_method_id, amount)
                VALUES ($1, $2, gen_random_uuid(), '2026-02-01', $3, $4, $5, $6, -10000)"#,
-            owner_id, raw_id, src_merchant_id, actor_id, cat_id, pm_id
-        )
-        .execute(&*pool)
-        .await
-        .unwrap();
+            [owner_id.into(), raw_id.into(), src_merchant_id.into(), actor_id.into(), cat_id.into(), pm_id.into()],
+        )).await.unwrap();
     }
 
     // Register alias for the source merchant (norm_key of "이 마트").
     let norm_src = to_norm_key("이 마트");
-    sqlx::query!(
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
            VALUES ($1, 'merchant', '이 마트', $2, $3)"#,
-        owner_id, norm_src, src_merchant_id
-    )
-    .execute(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), norm_src.into(), src_merchant_id.into()],
+    )).await.unwrap();
 
     // POST /api/aliases to merge.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "merchant",
         "raw_text": "이 마트",
@@ -233,137 +244,112 @@ async fn merge_merchant_remaps_transactions(pool: PgPool) {
     assert_eq!(json["orphan_deleted"], true, "orphan merchant should be deleted");
 
     // Verify transactions now reference target.
-    let remaining_src: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
-        owner_id, src_merchant_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap()
-    .unwrap_or(0);
+    let remaining_src = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
+        [owner_id.into(), src_merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().c;
     assert_eq!(remaining_src, 0, "no transactions should reference the source merchant");
 
-    let tgt_count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
-        owner_id, tgt_merchant_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap()
-    .unwrap_or(0);
+    let tgt_count = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
+        [owner_id.into(), tgt_merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().c;
     assert_eq!(tgt_count, 3, "all 3 transactions should reference the target merchant");
 
     // Verify source merchant row is gone.
-    let src_exists: bool = sqlx::query_scalar!(
-        r#"SELECT EXISTS(SELECT 1 FROM merchants WHERE id = $1) AS "e!: bool""#,
-        src_merchant_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+    let src_exists = BoolRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT EXISTS(SELECT 1 FROM merchants WHERE id = $1) AS e"#,
+        [src_merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().e;
     assert!(!src_exists, "source merchant row should have been deleted");
 }
 
 // ── Test 2: merge_product_remaps_product_id ───────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn merge_product_remaps_product_id(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn merge_product_remaps_product_id() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed merchant for FK.
-    let merchant_id: Uuid = sqlx::query_scalar!(
+    let merchant_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, '와인숍', 'confirmed') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     // Source product "조닌끼안티" and target "조닌 끼안티" (one space difference).
-    let src_product_id: Uuid = sqlx::query_scalar!(
+    let src_product_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO products (owner_id, merchant_id, name, review_state)
            VALUES ($1, $2, '조닌끼안티', 'pending') RETURNING id"#,
-        owner_id, merchant_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let tgt_product_id: Uuid = sqlx::query_scalar!(
+    let tgt_product_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO products (owner_id, merchant_id, name, review_state)
            VALUES ($1, $2, '조닌 끼안티', 'confirmed') RETURNING id"#,
-        owner_id, merchant_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let cat_id: Uuid = sqlx::query_scalar!(
+    let cat_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO categories (owner_id, name, kind, review_state) VALUES ($1, '와인', 'expense', 'pending') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let actor_id: Uuid = sqlx::query_scalar!(
+    let actor_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '공동') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let pm_id: Uuid = sqlx::query_scalar!(
+    let pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name) VALUES ($1, '하나') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let batch_id = insert_batch(&pool, owner_id, "p2").await;
+    let batch_id = insert_batch(&*db, owner_id, "p2").await;
 
     // 2 transactions referencing the source product.
-    for i in 0..2_i32 {
-        let raw_id: Uuid = sqlx::query_scalar!(
+    for i in 0..2_i64 {
+        let raw_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
             r#"INSERT INTO transactions_raw
                (owner_id, import_batch_id, row_index, group_id, is_group_header,
                 occurred_on, memo, line_amount)
                VALUES ($1, $2, $3, gen_random_uuid(), false, '2026-02-01', '조닌끼안티', 34000)
                RETURNING id"#,
-            owner_id, batch_id, i
-        )
-        .fetch_one(&*pool)
-        .await
-        .unwrap();
+            [owner_id.into(), batch_id.into(), i.into()],
+        )).one(&*db).await.unwrap().unwrap().id;
 
-        sqlx::query!(
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
             r#"INSERT INTO transactions
                (owner_id, raw_id, group_id, occurred_on, merchant_id, actor_id,
                 category_id, product_id, payment_method_id, amount, memo)
                VALUES ($1, $2, gen_random_uuid(), '2026-02-01', $3, $4, $5, $6, $7, -34000, '조닌끼안티')"#,
-            owner_id, raw_id, merchant_id, actor_id, cat_id, src_product_id, pm_id
-        )
-        .execute(&*pool)
-        .await
-        .unwrap();
+            [owner_id.into(), raw_id.into(), merchant_id.into(), actor_id.into(), cat_id.into(), src_product_id.into(), pm_id.into()],
+        )).await.unwrap();
     }
 
     // Register alias for the source product.
     let norm_src = to_norm_key("조닌끼안티");
-    sqlx::query!(
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
            VALUES ($1, 'product', '조닌끼안티', $2, $3)"#,
-        owner_id, norm_src, src_product_id
-    )
-    .execute(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), norm_src.into(), src_product_id.into()],
+    )).await.unwrap();
 
     // POST /api/aliases to merge.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "product",
         "raw_text": "조닌끼안티",
@@ -384,46 +370,40 @@ async fn merge_product_remaps_product_id(pool: PgPool) {
     assert_eq!(json["orphan_deleted"], true);
 
     // Verify transactions reference target product.
-    let tgt_count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM transactions WHERE owner_id = $1 AND product_id = $2"#,
-        owner_id, tgt_product_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap()
-    .unwrap_or(0);
+    let tgt_count = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM transactions WHERE owner_id = $1 AND product_id = $2"#,
+        [owner_id.into(), tgt_product_id.into()],
+    )).one(&*db).await.unwrap().unwrap().c;
     assert_eq!(tgt_count, 2);
 
     // Source product row deleted.
-    let src_exists: bool = sqlx::query_scalar!(
-        r#"SELECT EXISTS(SELECT 1 FROM products WHERE id = $1) AS "e!: bool""#,
-        src_product_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+    let src_exists = BoolRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT EXISTS(SELECT 1 FROM products WHERE id = $1) AS e"#,
+        [src_product_id.into()],
+    )).one(&*db).await.unwrap().unwrap().e;
     assert!(!src_exists, "source product should be deleted");
 }
 
 // ── Test 3: confirm_rejects_deduction_category ────────────────────────────────
 
 /// The "차감" category must be rejected by POST /api/entities/category/:id/confirm.
-#[sqlx::test(migrations = "./migrations")]
-async fn confirm_rejects_deduction_category(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn confirm_rejects_deduction_category() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Find the 차감 category id.
-    let chagang_id: Uuid = sqlx::query_scalar!(
+    let chagang_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT id FROM categories WHERE owner_id = $1 AND name = '차감'"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/entities/category/{}/confirm", chagang_id))
@@ -441,54 +421,47 @@ async fn confirm_rejects_deduction_category(pool: PgPool) {
 
 /// Two tokio tasks attempt to merge the same source merchant into two different
 /// targets simultaneously. Exactly one must succeed (200) and the other must 409.
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_merges_one_winner(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn concurrent_merges_one_winner() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed: source + two targets + supporting entities.
-    let src_id: Uuid = sqlx::query_scalar!(
+    let src_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, '소스가맹', 'pending') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let tgt_a_id: Uuid = sqlx::query_scalar!(
+    let tgt_a_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, '타겟A', 'confirmed') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let tgt_b_id: Uuid = sqlx::query_scalar!(
+    let tgt_b_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, '타겟B', 'confirmed') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     // Register alias pointing to the source.
     let norm = to_norm_key("소스가맹");
-    sqlx::query!(
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
            VALUES ($1, 'merchant', '소스가맹', $2, $3)"#,
-        owner_id, norm, src_id
-    )
-    .execute(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), norm.into(), src_id.into()],
+    )).await.unwrap();
 
     let barrier = Arc::new(Barrier::new(2));
 
-    let pool1 = pool.clone();
+    let db1 = Arc::clone(&db);
     let barrier1 = barrier.clone();
     let oid1 = owner_id;
 
-    let pool2 = pool.clone();
+    let db2 = Arc::clone(&db);
     let barrier2 = barrier.clone();
     let oid2 = owner_id;
 
@@ -504,7 +477,7 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
                 "/api/aliases",
                 routing::post(finance_manager::api::aliases::handle_post_alias),
             )
-            .with_state(pool1.clone())
+            .with_state(db1)
             .layer(middleware::from_fn(
                 move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                     let u = user.clone();
@@ -544,7 +517,7 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
                 "/api/aliases",
                 routing::post(finance_manager::api::aliases::handle_post_alias),
             )
-            .with_state(pool2.clone())
+            .with_state(db2)
             .layer(middleware::from_fn(
                 move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                     let u = user.clone();
@@ -587,57 +560,48 @@ async fn concurrent_merges_one_winner(pool: PgPool) {
 
 // ── Test 5: payment_method_cross_actor_merge_rejected ─────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_method_cross_actor_merge_rejected(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn payment_method_cross_actor_merge_rejected() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // Seed two actors.
-    let eongnea_id: Uuid = sqlx::query_scalar!(
+    let eongnea_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let baby_id: Uuid = sqlx::query_scalar!(
+    let baby_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '아기') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     // Source pinned to 엉아, target pinned to 아기.
-    let src_pm_id: Uuid = sqlx::query_scalar!(
+    let src_pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name, actor_id) VALUES ($1, '신한엉아', $2) RETURNING id"#,
-        owner_id, eongnea_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), eongnea_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let tgt_pm_id: Uuid = sqlx::query_scalar!(
+    let tgt_pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name, actor_id) VALUES ($1, '신한아기', $2) RETURNING id"#,
-        owner_id, baby_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), baby_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     // Register alias for the source.
     let norm = to_norm_key("신한엉아");
-    sqlx::query!(
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
            VALUES ($1, 'payment_method', '신한엉아', $2, $3)"#,
-        owner_id, norm, src_pm_id
-    )
-    .execute(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), norm.into(), src_pm_id.into()],
+    )).await.unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "payment_method",
         "raw_text": "신한엉아",
@@ -682,46 +646,39 @@ async fn payment_method_cross_actor_merge_rejected(pool: PgPool) {
 // ── Test 5b: payment_method_same_actor_merge_allowed ─────────────────────────
 
 /// Merging two payment methods pinned to the same actor must succeed.
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_method_same_actor_merge_allowed(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn payment_method_same_actor_merge_allowed() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
-    let actor_id: Uuid = sqlx::query_scalar!(
+    let actor_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '아기') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let src_pm_id: Uuid = sqlx::query_scalar!(
+    let src_pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name, actor_id) VALUES ($1, '롯데A', $2) RETURNING id"#,
-        owner_id, actor_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), actor_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let tgt_pm_id: Uuid = sqlx::query_scalar!(
+    let tgt_pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name, actor_id) VALUES ($1, '롯데B', $2) RETURNING id"#,
-        owner_id, actor_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), actor_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     let norm = to_norm_key("롯데A");
-    sqlx::query!(
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
            VALUES ($1, 'payment_method', '롯데A', $2, $3)"#,
-        owner_id, norm, src_pm_id
-    )
-    .execute(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), norm.into(), src_pm_id.into()],
+    )).await.unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "payment_method",
         "raw_text": "롯데A",
@@ -740,47 +697,40 @@ async fn payment_method_same_actor_merge_allowed(pool: PgPool) {
 // ── Test 5c: payment_method_null_actor_merge_allowed ─────────────────────────
 
 /// Merging where one side has NULL actor_id must be allowed.
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_method_null_actor_merge_allowed(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn payment_method_null_actor_merge_allowed() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
-    let actor_id: Uuid = sqlx::query_scalar!(
+    let actor_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     // Source has NULL actor_id, target has a real actor.
-    let src_pm_id: Uuid = sqlx::query_scalar!(
+    let src_pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name) VALUES ($1, '현금X') RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let tgt_pm_id: Uuid = sqlx::query_scalar!(
+    let tgt_pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO payment_methods (owner_id, name, actor_id) VALUES ($1, '현금Y', $2) RETURNING id"#,
-        owner_id, actor_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), actor_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     let norm = to_norm_key("현금X");
-    sqlx::query!(
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
            VALUES ($1, 'payment_method', '현금X', $2, $3)"#,
-        owner_id, norm, src_pm_id
-    )
-    .execute(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into(), norm.into(), src_pm_id.into()],
+    )).await.unwrap();
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "payment_method",
         "raw_text": "현금X",
@@ -800,18 +750,23 @@ async fn payment_method_null_actor_merge_allowed(pool: PgPool) {
 
 /// Import the golden file, then merge two arbitrary merchants. Verify that
 /// v_monthly_settlement's deducted_amount and settlement_input remain correct.
-#[sqlx::test(migrations = "./migrations")]
-async fn settlement_unchanged_after_merge(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[derive(FromQueryResult)]
+struct MerchantRow { id: Uuid, name: String }
+
+#[tokio::test]
+async fn settlement_unchanged_after_merge() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Pick two merchants to merge (any two — just not source=target).
-    let merchants: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name AS "name!" FROM merchants WHERE owner_id = $1 ORDER BY name LIMIT 2"#,
-        owner_id
-    )
-    .fetch_all(&*pool)
+    let merchants: Vec<(Uuid, String)> = MerchantRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM merchants WHERE owner_id = $1 ORDER BY name LIMIT 2"#,
+        [owner_id.into()],
+    ))
+    .all(&*db)
     .await
     .unwrap()
     .into_iter()
@@ -829,29 +784,25 @@ async fn settlement_unchanged_after_merge(pool: PgPool) {
 
     // Only merge if there's an alias for the source (pipeline creates them).
     let src_norm = to_norm_key(src_name);
-    let alias_exists: bool = sqlx::query_scalar!(
-        r#"SELECT EXISTS(SELECT 1 FROM aliases WHERE owner_id = $1 AND scope = 'merchant' AND norm_key = $2) AS "e!: bool""#,
-        owner_id, src_norm
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+    let alias_exists = BoolRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT EXISTS(SELECT 1 FROM aliases WHERE owner_id = $1 AND scope = 'merchant' AND norm_key = $2) AS e"#,
+        [owner_id.into(), src_norm.clone().into()],
+    )).one(&*db).await.unwrap().unwrap().e;
 
     if !alias_exists {
         // No alias to merge — skip by inserting one.
-        sqlx::query!(
+        db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
             r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
                VALUES ($1, 'merchant', $2, $3, $4)
                ON CONFLICT (owner_id, scope, norm_key) DO NOTHING"#,
-            owner_id, src_name.as_str(), src_norm, src_id
-        )
-        .execute(&*pool)
-        .await
-        .unwrap();
+            [owner_id.into(), src_name.as_str().into(), src_norm.into(), (*src_id).into()],
+        )).await.unwrap();
     }
 
     // Do the merge.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let body = serde_json::json!({
         "scope": "merchant",
         "raw_text": src_name,
@@ -914,36 +865,36 @@ async fn settlement_unchanged_after_merge(pool: PgPool) {
 // ── Test 7: delete_alias_removes_only_alias_row ───────────────────────────────
 
 /// DELETE /api/aliases/:id must remove the alias row and not touch transactions.
-#[sqlx::test(migrations = "./migrations")]
-async fn delete_alias_removes_only_alias_row(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[derive(FromQueryResult)]
+struct AliasRow { id: Uuid, target_id: Uuid }
+
+#[tokio::test]
+async fn delete_alias_removes_only_alias_row() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Pick any alias.
-    let alias: (Uuid, Uuid) = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", target_id AS "target_id!: Uuid"
-           FROM aliases WHERE owner_id = $1 AND scope = 'merchant' LIMIT 1"#,
-        owner_id
-    )
-    .fetch_optional(&*pool)
+    let alias_row = AliasRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, target_id FROM aliases WHERE owner_id = $1 AND scope = 'merchant' LIMIT 1"#,
+        [owner_id.into()],
+    ))
+    .one(&*db)
     .await
     .unwrap()
-    .map(|r| (r.id, r.target_id))
     .expect("should have at least one merchant alias after import");
 
-    let (alias_id, target_id) = alias;
+    let (alias_id, target_id) = (alias_row.id, alias_row.target_id);
 
-    let tx_count_before: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
-        owner_id, target_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap()
-    .unwrap_or(0);
+    let tx_count_before = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
+        [owner_id.into(), target_id.into()],
+    )).one(&*db).await.unwrap().unwrap().c;
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("DELETE")
         .uri(format!("/api/aliases/{}", alias_id))
@@ -953,36 +904,32 @@ async fn delete_alias_removes_only_alias_row(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
     // Alias row gone.
-    let alias_exists: bool = sqlx::query_scalar!(
-        r#"SELECT EXISTS(SELECT 1 FROM aliases WHERE id = $1) AS "e!: bool""#,
-        alias_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+    let alias_exists = BoolRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT EXISTS(SELECT 1 FROM aliases WHERE id = $1) AS e"#,
+        [alias_id.into()],
+    )).one(&*db).await.unwrap().unwrap().e;
     assert!(!alias_exists);
 
     // Transactions untouched.
-    let tx_count_after: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
-        owner_id, target_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap()
-    .unwrap_or(0);
+    let tx_count_after = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM transactions WHERE owner_id = $1 AND merchant_id = $2"#,
+        [owner_id.into(), target_id.into()],
+    )).one(&*db).await.unwrap().unwrap().c;
     assert_eq!(tx_count_before, tx_count_after, "transactions must be untouched by alias delete");
 }
 
 // ── Test 8: review_queue_returns_pending_items ────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn review_queue_returns_pending_items(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn review_queue_returns_pending_items() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .uri("/api/review-queue?scope=merchant")
         .body(Body::empty())
@@ -1005,22 +952,21 @@ async fn review_queue_returns_pending_items(pool: PgPool) {
 
 // ── Test 9: confirm_merchant_flips_review_state ───────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn confirm_merchant_flips_review_state(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn confirm_merchant_flips_review_state() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Find a pending merchant.
-    let merchant_id: Uuid = sqlx::query_scalar!(
+    let merchant_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT id FROM merchants WHERE owner_id = $1 AND review_state = 'pending' LIMIT 1"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/entities/merchant/{}/confirm", merchant_id))
@@ -1034,13 +980,11 @@ async fn confirm_merchant_flips_review_state(pool: PgPool) {
     assert_eq!(json["review_state"].as_str(), Some("confirmed"));
 
     // Verify in DB.
-    let state: String = sqlx::query_scalar!(
+    let state = StateRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT review_state FROM merchants WHERE id = $1"#,
-        merchant_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().review_state;
     assert_eq!(state, "confirmed");
 }
 
@@ -1050,22 +994,21 @@ async fn confirm_merchant_flips_review_state(pool: PgPool) {
 /// review_state='pending'. Confirming via POST /api/entities/payment_method/:id/confirm
 /// must flip the row to 'confirmed', and /api/review-queue?scope=payment_method
 /// must drop the row from pending.
-#[sqlx::test(migrations = "./migrations")]
-async fn confirm_payment_method_flips_review_state(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn confirm_payment_method_flips_review_state() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let pm_id: Uuid = sqlx::query_scalar!(
+    let pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT id FROM payment_methods WHERE owner_id = $1 AND review_state = 'pending' LIMIT 1"#,
-        owner_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
 
     // Confirm.
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/entities/payment_method/{}/confirm", pm_id))
@@ -1079,13 +1022,11 @@ async fn confirm_payment_method_flips_review_state(pool: PgPool) {
     assert_eq!(json["review_state"].as_str(), Some("confirmed"));
 
     // DB confirmation.
-    let state: String = sqlx::query_scalar!(
+    let state = StateRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT review_state FROM payment_methods WHERE id = $1"#,
-        pm_id
-    )
-    .fetch_one(&*pool)
-    .await
-    .unwrap();
+        [pm_id.into()],
+    )).one(&*db).await.unwrap().unwrap().review_state;
     assert_eq!(state, "confirmed");
 
     // Review queue must no longer include this id.
@@ -1107,13 +1048,14 @@ async fn confirm_payment_method_flips_review_state(pool: PgPool) {
 
 /// /api/review-queue?scope=payment_method must return the freshly imported
 /// (pending) payment methods after the golden import.
-#[sqlx::test(migrations = "./migrations")]
-async fn review_queue_payment_method_returns_pending(pool: PgPool) {
-    let pool = Arc::new(pool);
+#[tokio::test]
+async fn review_queue_payment_method_returns_pending() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let app = build_test_router(pool.clone(), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
         .uri("/api/review-queue?scope=payment_method")
         .body(Body::empty())

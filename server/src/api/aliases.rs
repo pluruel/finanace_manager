@@ -11,13 +11,23 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait,
+    DatabaseBackend, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement, TransactionTrait,
+};
+use sea_orm::sea_query::LockType;
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::{PgConnection, PgPool};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::ExtractUser;
+use crate::entity::{
+    aliases, categories, ledger_actors, merchants, payment_methods, products,
+    prelude::*,
+};
 use crate::error::{AppError, AppResult};
 use crate::import::normalize::to_norm_key;
 
@@ -114,12 +124,11 @@ pub struct MergeCandidate {
 }
 
 pub async fn handle_get_review_queue(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(params): Query<ReviewQueueQuery>,
 ) -> AppResult<Json<Vec<ReviewQueueItem>>> {
     let owner_id = user.sub;
-    let mut conn = pool.acquire().await?;
 
     let scopes_to_query: Vec<&str> = match &params.scope {
         Some(s) => {
@@ -137,7 +146,7 @@ pub async fn handle_get_review_queue(
     let mut result: Vec<ReviewQueueItem> = Vec::new();
 
     for scope in scopes_to_query {
-        let items = review_queue_for_scope(&mut conn, owner_id, scope).await?;
+        let items = review_queue_for_scope(&*db, owner_id, scope).await?;
         result.extend(items);
     }
 
@@ -147,32 +156,25 @@ pub async fn handle_get_review_queue(
 /// Fetch pending entities for a given scope and build review-queue items with
 /// their aliases and merge candidates.
 async fn review_queue_for_scope(
-    conn: &mut PgConnection,
+    db: &DatabaseConnection,
     owner_id: Uuid,
     scope: &str,
 ) -> Result<Vec<ReviewQueueItem>, AppError> {
     // Fetch all entities of this scope for this owner (needed for merge candidates too).
     // We always fetch all, because merge_candidates requires the full list.
-    let all_entities = fetch_all_entities(conn, owner_id, scope).await?;
+    let all_entities = fetch_all_entities(db, owner_id, scope).await?;
 
     // Fetch all aliases for this scope+owner (to join raw_texts).
-    let all_aliases: Vec<(Uuid, String, String, Uuid)> = sqlx::query!(
-        r#"
-        SELECT id AS "alias_id!: Uuid",
-               raw_text AS "raw_text!",
-               norm_key AS "norm_key!",
-               target_id AS "target_id!: Uuid"
-        FROM aliases
-        WHERE owner_id = $1 AND scope = $2
-        "#,
-        owner_id,
-        scope,
-    )
-    .fetch_all(&mut *conn)
-    .await?
-    .into_iter()
-    .map(|r| (r.alias_id, r.raw_text, r.norm_key, r.target_id))
-    .collect();
+    let all_aliases_models = Aliases::find()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq(scope))
+        .all(db)
+        .await?;
+
+    let all_aliases: Vec<(Uuid, String, String, Uuid)> = all_aliases_models
+        .into_iter()
+        .map(|r| (r.id, r.raw_text, r.norm_key, r.target_id))
+        .collect();
 
     // Only work on pending entities.
     let pending: Vec<(Uuid, String, Option<String>)> = all_entities
@@ -249,43 +251,37 @@ async fn review_queue_for_scope(
 /// Returns (id, name, review_state, kind) for all entities of the given scope.
 /// `kind` is Some("income"|"expense") for category scope; None for all other scopes.
 async fn fetch_all_entities(
-    conn: &mut PgConnection,
+    db: &DatabaseConnection,
     owner_id: Uuid,
     scope: &str,
 ) -> Result<Vec<(Uuid, String, String, Option<String>)>, AppError> {
     let rows = match scope {
-        "category" => sqlx::query!(
-            r#"SELECT id AS "id!: Uuid", name AS "name!", review_state AS "review_state!", kind AS "kind!"
-               FROM categories WHERE owner_id = $1 ORDER BY name"#,
-            owner_id
-        )
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|r| (r.id, r.name, r.review_state, Some(r.kind)))
-        .collect(),
+        "category" => Categories::find()
+            .filter(categories::Column::OwnerId.eq(owner_id))
+            .order_by_asc(categories::Column::Name)
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.name, r.review_state, Some(r.kind)))
+            .collect(),
 
-        "merchant" => sqlx::query!(
-            r#"SELECT id AS "id!: Uuid", name AS "name!", review_state AS "review_state!"
-               FROM merchants WHERE owner_id = $1 ORDER BY name"#,
-            owner_id
-        )
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|r| (r.id, r.name, r.review_state, None))
-        .collect(),
+        "merchant" => Merchants::find()
+            .filter(merchants::Column::OwnerId.eq(owner_id))
+            .order_by_asc(merchants::Column::Name)
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.name, r.review_state, None))
+            .collect(),
 
-        "payment_method" => sqlx::query!(
-            r#"SELECT id AS "id!: Uuid", name AS "name!", review_state AS "review_state!"
-               FROM payment_methods WHERE owner_id = $1 ORDER BY name"#,
-            owner_id
-        )
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|r| (r.id, r.name, r.review_state, None))
-        .collect(),
+        "payment_method" => PaymentMethods::find()
+            .filter(payment_methods::Column::OwnerId.eq(owner_id))
+            .order_by_asc(payment_methods::Column::Name)
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.name, r.review_state, None))
+            .collect(),
 
         "actor" => {
             // ledger_actors has no review_state. The 3 fixed actors (공동/엉아/아기)
@@ -293,16 +289,14 @@ async fn fetch_all_entities(
             vec![]
         }
 
-        "product" => sqlx::query!(
-            r#"SELECT id AS "id!: Uuid", name AS "name!", review_state AS "review_state!"
-               FROM products WHERE owner_id = $1 ORDER BY name"#,
-            owner_id
-        )
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|r| (r.id, r.name, r.review_state, None))
-        .collect(),
+        "product" => Products::find()
+            .filter(products::Column::OwnerId.eq(owner_id))
+            .order_by_asc(products::Column::Name)
+            .all(db)
+            .await?
+            .into_iter()
+            .map(|r| (r.id, r.name, r.review_state, None))
+            .collect(),
 
         _ => return Err(AppError::BadRequest(format!("Unknown scope: {}", scope))),
     };
@@ -333,7 +327,7 @@ pub struct PostAliasResponse {
 }
 
 pub async fn handle_post_alias(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Json(body): Json<PostAliasBody>,
 ) -> AppResult<Json<PostAliasResponse>> {
@@ -349,31 +343,26 @@ pub async fn handle_post_alias(
 
     let norm = to_norm_key(&body.raw_text);
 
-    let mut tx = pool.begin().await?;
+    let txn = db.begin().await?;
 
     // Acquire the alias row lock as the first SQL operation. Under READ COMMITTED,
     // a SELECT ... FOR UPDATE that races a concurrent UPDATE+COMMIT will block
     // until the other transaction commits, then re-read the row at the latest
     // committed version. This serialises concurrent merges of the same alias.
-    let existing = sqlx::query!(
-        r#"
-        SELECT id AS "alias_id!: Uuid", target_id AS "target_id!: Uuid"
-        FROM aliases
-        WHERE owner_id = $1 AND scope = $2 AND norm_key = $3
-        FOR UPDATE
-        "#,
-        owner_id,
-        scope.as_str(),
-        norm,
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
+    // (Pattern E — lock_exclusive)
+    let existing = Aliases::find()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq(scope.as_str()))
+        .filter(aliases::Column::NormKey.eq(&norm))
+        .lock(LockType::Update)
+        .one(&txn)
+        .await?;
 
     // If the client told us which entity it expected the alias to point to, verify
     // it under the lock. A mismatch means another transaction already remapped the
     // alias (in either fully-concurrent or sequential timing). This makes merge
     // races deterministic regardless of scheduler order.
-    if let (Some(expected), Some(row)) = (body.source_id, existing.as_ref()) {
+    if let (Some(expected), Some(ref row)) = (body.source_id, existing.as_ref()) {
         if row.target_id != expected {
             return Err(AppError::Conflict(serde_json::json!({
                 "error": "alias_changed",
@@ -384,26 +373,25 @@ pub async fn handle_post_alias(
     }
 
     // Verify target entity exists for this owner+scope.
-    verify_entity_exists(&mut tx, owner_id, scope, body.target_id).await?;
+    verify_entity_exists(&txn, owner_id, scope, body.target_id).await?;
 
     // Check for 차감 protection (category scope).
     if scope == "category" {
-        check_chagang_protection(&mut tx, owner_id, body.target_id, "target").await?;
+        check_chagang_protection(&txn, owner_id, body.target_id, "target").await?;
     }
 
     let resp = match existing {
         None => {
             // Create path: no existing alias (or deleted between phases — treated as new).
-            sqlx::query!(
-                r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
-                   VALUES ($1, $2, $3, $4, $5)"#,
-                owner_id,
-                scope.as_str(),
-                body.raw_text,
-                norm,
-                body.target_id,
-            )
-            .execute(&mut *tx)
+            aliases::ActiveModel {
+                owner_id: Set(owner_id),
+                scope: Set(scope.clone()),
+                raw_text: Set(body.raw_text.clone()),
+                norm_key: Set(norm),
+                target_id: Set(body.target_id),
+                ..Default::default()
+            }
+            .insert(&txn)
             .await?;
 
             PostAliasResponse {
@@ -425,17 +413,17 @@ pub async fn handle_post_alias(
         Some(existing_row) => {
             // Merge path: alias exists but points to a different target.
             let old_target_id = existing_row.target_id;
-            let alias_id = existing_row.alias_id;
+            let alias_id = existing_row.id;
 
             // 차감 protection for source (category scope).
             if scope == "category" {
-                check_chagang_protection(&mut tx, owner_id, old_target_id, "source").await?;
+                check_chagang_protection(&txn, owner_id, old_target_id, "source").await?;
             }
 
             // payment_method cross-actor check.
             if scope == "payment_method" {
                 check_payment_method_actor_compatibility(
-                    &mut tx,
+                    &txn,
                     owner_id,
                     old_target_id,
                     body.target_id,
@@ -445,21 +433,21 @@ pub async fn handle_post_alias(
 
             // SELECT ... FOR UPDATE on the source entity row to prevent concurrent
             // deletes or other entity-level races on the source entity.
-            lock_entity_row(&mut tx, owner_id, scope, old_target_id).await?;
+            lock_entity_row(&txn, owner_id, scope, old_target_id).await?;
 
             // Update alias to point to new target.
-            sqlx::query!(
-                r#"UPDATE aliases SET target_id = $1, raw_text = $2 WHERE id = $3"#,
-                body.target_id,
-                body.raw_text,
-                alias_id,
-            )
-            .execute(&mut *tx)
+            aliases::ActiveModel {
+                id: Set(alias_id),
+                target_id: Set(body.target_id),
+                raw_text: Set(body.raw_text.clone()),
+                ..Default::default()
+            }
+            .update(&txn)
             .await?;
 
             // Remap transactions.
             let remapped = remap_transactions(
-                &mut tx,
+                &txn,
                 owner_id,
                 scope,
                 old_target_id,
@@ -469,7 +457,7 @@ pub async fn handle_post_alias(
 
             // Optionally delete the orphaned source entity.
             let orphan_deleted =
-                maybe_delete_orphan(&mut tx, owner_id, scope, old_target_id).await?;
+                maybe_delete_orphan(&txn, owner_id, scope, old_target_id).await?;
 
             PostAliasResponse {
                 created: false,
@@ -479,28 +467,26 @@ pub async fn handle_post_alias(
         }
     };
 
-    tx.commit().await?;
+    txn.commit().await?;
     Ok(Json(resp))
 }
 
 // ── DELETE /api/aliases/:id ───────────────────────────────────────────────────
 
 pub async fn handle_delete_alias(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path(alias_id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
     let owner_id = user.sub;
 
-    let result = sqlx::query!(
-        r#"DELETE FROM aliases WHERE id = $1 AND owner_id = $2"#,
-        alias_id,
-        owner_id,
-    )
-    .execute(&*pool)
-    .await?;
+    let result = Aliases::delete_many()
+        .filter(aliases::Column::Id.eq(alias_id))
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .exec(&*db)
+        .await?;
 
-    if result.rows_affected() == 0 {
+    if result.rows_affected == 0 {
         return Err(AppError::NotFound(format!(
             "Alias {} not found or not owned by you",
             alias_id
@@ -513,7 +499,7 @@ pub async fn handle_delete_alias(
 // ── POST /api/entities/:scope/:id/confirm ────────────────────────────────────
 
 pub async fn handle_confirm_entity(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Path((scope, entity_id)): Path<(String, Uuid)>,
 ) -> AppResult<Json<Value>> {
@@ -534,15 +520,13 @@ pub async fn handle_confirm_entity(
         )));
     }
 
-    let mut conn = pool.acquire().await?;
-
     // 차감 protection (category scope only).
     if scope == "category" {
-        check_chagang_protection(&mut conn, owner_id, entity_id, "entity").await?;
+        check_chagang_protection(&*db, owner_id, entity_id, "entity").await?;
     }
 
     // Attempt to set review_state = 'confirmed'.
-    let new_state = confirm_entity(&mut conn, owner_id, &scope, entity_id).await?;
+    let new_state = confirm_entity(&*db, owner_id, &scope, entity_id).await?;
 
     Ok(Json(json!({ "id": entity_id, "review_state": new_state })))
 }
@@ -551,46 +535,41 @@ pub async fn handle_confirm_entity(
 
 /// Verify that the given entity id exists in the correct scope table for this owner.
 async fn verify_entity_exists(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     scope: &str,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
     let exists = match scope {
-        "category" => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM categories WHERE id = $1 AND owner_id = $2) AS "e!: bool""#,
-            entity_id, owner_id
-        )
-        .fetch_one(&mut *conn)
-        .await?,
+        "category" => Categories::find_by_id(entity_id)
+            .filter(categories::Column::OwnerId.eq(owner_id))
+            .one(txn)
+            .await?
+            .is_some(),
 
-        "merchant" => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM merchants WHERE id = $1 AND owner_id = $2) AS "e!: bool""#,
-            entity_id, owner_id
-        )
-        .fetch_one(&mut *conn)
-        .await?,
+        "merchant" => Merchants::find_by_id(entity_id)
+            .filter(merchants::Column::OwnerId.eq(owner_id))
+            .one(txn)
+            .await?
+            .is_some(),
 
-        "payment_method" => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM payment_methods WHERE id = $1 AND owner_id = $2) AS "e!: bool""#,
-            entity_id, owner_id
-        )
-        .fetch_one(&mut *conn)
-        .await?,
+        "payment_method" => PaymentMethods::find_by_id(entity_id)
+            .filter(payment_methods::Column::OwnerId.eq(owner_id))
+            .one(txn)
+            .await?
+            .is_some(),
 
-        "actor" => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM ledger_actors WHERE id = $1 AND owner_id = $2) AS "e!: bool""#,
-            entity_id, owner_id
-        )
-        .fetch_one(&mut *conn)
-        .await?,
+        "actor" => LedgerActors::find_by_id(entity_id)
+            .filter(ledger_actors::Column::OwnerId.eq(owner_id))
+            .one(txn)
+            .await?
+            .is_some(),
 
-        "product" => sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM products WHERE id = $1 AND owner_id = $2) AS "e!: bool""#,
-            entity_id, owner_id
-        )
-        .fetch_one(&mut *conn)
-        .await?,
+        "product" => Products::find_by_id(entity_id)
+            .filter(products::Column::OwnerId.eq(owner_id))
+            .one(txn)
+            .await?
+            .is_some(),
 
         _ => return Err(AppError::BadRequest(format!("Unknown scope: {}", scope))),
     };
@@ -605,22 +584,20 @@ async fn verify_entity_exists(
 }
 
 /// For category scope: reject if the entity is the protected "차감" category.
-async fn check_chagang_protection(
-    conn: &mut PgConnection,
+/// Works on both DatabaseTransaction and DatabaseConnection via ConnectionTrait.
+async fn check_chagang_protection<C: ConnectionTrait>(
+    conn: &C,
     owner_id: Uuid,
     entity_id: Uuid,
     role: &str,
 ) -> Result<(), AppError> {
-    let name: Option<String> = sqlx::query_scalar!(
-        r#"SELECT name FROM categories WHERE id = $1 AND owner_id = $2"#,
-        entity_id,
-        owner_id
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let row = Categories::find_by_id(entity_id)
+        .filter(categories::Column::OwnerId.eq(owner_id))
+        .one(conn)
+        .await?;
 
-    if let Some(n) = name {
-        if n == "차감" {
+    if let Some(cat) = row {
+        if cat.name == "차감" {
             return Err(AppError::Conflict(serde_json::json!({
                 "error": "deduction_protected",
                 "message": format!(
@@ -636,50 +613,41 @@ async fn check_chagang_protection(
 /// For payment_method scope: reject cross-actor merges when both sides have non-null actor_id
 /// and they differ.
 async fn check_payment_method_actor_compatibility(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     source_id: Uuid,
     target_id: Uuid,
 ) -> Result<(), AppError> {
-    let source_actor: Option<Option<Uuid>> = sqlx::query_scalar!(
-        r#"SELECT actor_id FROM payment_methods WHERE id = $1 AND owner_id = $2"#,
-        source_id,
-        owner_id
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let source = PaymentMethods::find_by_id(source_id)
+        .filter(payment_methods::Column::OwnerId.eq(owner_id))
+        .one(txn)
+        .await?;
 
-    let target_actor: Option<Option<Uuid>> = sqlx::query_scalar!(
-        r#"SELECT actor_id FROM payment_methods WHERE id = $1 AND owner_id = $2"#,
-        target_id,
-        owner_id
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let target = PaymentMethods::find_by_id(target_id)
+        .filter(payment_methods::Column::OwnerId.eq(owner_id))
+        .one(txn)
+        .await?;
 
-    // Flatten: None row → None actor_id; Some(row) → actor_id from row.
-    let src_actor = source_actor.flatten();
-    let tgt_actor = target_actor.flatten();
+    let src_actor = source.and_then(|r| r.actor_id);
+    let tgt_actor = target.and_then(|r| r.actor_id);
 
     // Reject only when both are non-null AND different.
     if let (Some(sa), Some(ta)) = (src_actor, tgt_actor) {
         if sa != ta {
             // Fetch actor names for a helpful error message.
-            let sa_name: String = sqlx::query_scalar!(
-                r#"SELECT name FROM ledger_actors WHERE id = $1 AND owner_id = $2"#,
-                sa, owner_id
-            )
-            .fetch_optional(&mut *conn)
-            .await?
-            .unwrap_or_else(|| sa.to_string());
+            let sa_name = LedgerActors::find_by_id(sa)
+                .filter(ledger_actors::Column::OwnerId.eq(owner_id))
+                .one(txn)
+                .await?
+                .map(|r| r.name)
+                .unwrap_or_else(|| sa.to_string());
 
-            let ta_name: String = sqlx::query_scalar!(
-                r#"SELECT name FROM ledger_actors WHERE id = $1 AND owner_id = $2"#,
-                ta, owner_id
-            )
-            .fetch_optional(&mut *conn)
-            .await?
-            .unwrap_or_else(|| ta.to_string());
+            let ta_name = LedgerActors::find_by_id(ta)
+                .filter(ledger_actors::Column::OwnerId.eq(owner_id))
+                .one(txn)
+                .await?
+                .map(|r| r.name)
+                .unwrap_or_else(|| ta.to_string());
 
             return Err(AppError::Conflict(serde_json::json!({
                 "error": "actor_mismatch",
@@ -698,52 +666,48 @@ async fn check_payment_method_actor_compatibility(
 
 /// Acquire a row-level lock on the source entity row for the merge path.
 /// This ensures concurrent merges of the same source entity serialize.
+/// (Pattern E — lock_exclusive)
 async fn lock_entity_row(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     scope: &str,
     entity_id: Uuid,
 ) -> Result<(), AppError> {
     match scope {
         "category" => {
-            sqlx::query!(
-                r#"SELECT id FROM categories WHERE id = $1 AND owner_id = $2 FOR UPDATE"#,
-                entity_id, owner_id
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
+            Categories::find_by_id(entity_id)
+                .filter(categories::Column::OwnerId.eq(owner_id))
+                .lock(LockType::Update)
+                .one(txn)
+                .await?;
         }
         "merchant" => {
-            sqlx::query!(
-                r#"SELECT id FROM merchants WHERE id = $1 AND owner_id = $2 FOR UPDATE"#,
-                entity_id, owner_id
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
+            Merchants::find_by_id(entity_id)
+                .filter(merchants::Column::OwnerId.eq(owner_id))
+                .lock(LockType::Update)
+                .one(txn)
+                .await?;
         }
         "payment_method" => {
-            sqlx::query!(
-                r#"SELECT id FROM payment_methods WHERE id = $1 AND owner_id = $2 FOR UPDATE"#,
-                entity_id, owner_id
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
+            PaymentMethods::find_by_id(entity_id)
+                .filter(payment_methods::Column::OwnerId.eq(owner_id))
+                .lock(LockType::Update)
+                .one(txn)
+                .await?;
         }
         "actor" => {
-            sqlx::query!(
-                r#"SELECT id FROM ledger_actors WHERE id = $1 AND owner_id = $2 FOR UPDATE"#,
-                entity_id, owner_id
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
+            LedgerActors::find_by_id(entity_id)
+                .filter(ledger_actors::Column::OwnerId.eq(owner_id))
+                .lock(LockType::Update)
+                .one(txn)
+                .await?;
         }
         "product" => {
-            sqlx::query!(
-                r#"SELECT id FROM products WHERE id = $1 AND owner_id = $2 FOR UPDATE"#,
-                entity_id, owner_id
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
+            Products::find_by_id(entity_id)
+                .filter(products::Column::OwnerId.eq(owner_id))
+                .lock(LockType::Update)
+                .one(txn)
+                .await?;
         }
         _ => {}
     }
@@ -752,69 +716,37 @@ async fn lock_entity_row(
 
 /// UPDATE transactions to remap old_id → new_id for the given scope FK.
 /// Returns number of rows updated.
+/// Uses raw SQL with whitelisted column names (from scope_meta) for dynamic FK columns.
 async fn remap_transactions(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     scope: &str,
     old_id: Uuid,
     new_id: Uuid,
 ) -> Result<i64, AppError> {
-    let rows_affected = match scope {
-        "category" => sqlx::query!(
-            r#"UPDATE transactions SET category_id = $1
-               WHERE owner_id = $2 AND category_id = $3"#,
-            new_id, owner_id, old_id
-        )
-        .execute(&mut *conn)
-        .await?
-        .rows_affected(),
+    let (_, tx_fk) = scope_meta(scope).unwrap();
 
-        "merchant" => sqlx::query!(
-            r#"UPDATE transactions SET merchant_id = $1
-               WHERE owner_id = $2 AND merchant_id = $3"#,
-            new_id, owner_id, old_id
-        )
-        .execute(&mut *conn)
-        .await?
-        .rows_affected(),
+    // Column name from scope_meta whitelist — not from user input. Safe.
+    let sql = format!(
+        "UPDATE transactions SET {} = $1 WHERE owner_id = $2 AND {} = $3",
+        tx_fk, tx_fk
+    );
+    let result = txn
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &sql,
+            [new_id.into(), owner_id.into(), old_id.into()],
+        ))
+        .await
+        .map_err(AppError::Orm)?;
 
-        "payment_method" => sqlx::query!(
-            r#"UPDATE transactions SET payment_method_id = $1
-               WHERE owner_id = $2 AND payment_method_id = $3"#,
-            new_id, owner_id, old_id
-        )
-        .execute(&mut *conn)
-        .await?
-        .rows_affected(),
-
-        "actor" => sqlx::query!(
-            r#"UPDATE transactions SET actor_id = $1
-               WHERE owner_id = $2 AND actor_id = $3"#,
-            new_id, owner_id, old_id
-        )
-        .execute(&mut *conn)
-        .await?
-        .rows_affected(),
-
-        "product" => sqlx::query!(
-            r#"UPDATE transactions SET product_id = $1
-               WHERE owner_id = $2 AND product_id = $3"#,
-            new_id, owner_id, old_id
-        )
-        .execute(&mut *conn)
-        .await?
-        .rows_affected(),
-
-        _ => 0,
-    };
-
-    Ok(rows_affected as i64)
+    Ok(result.rows_affected() as i64)
 }
 
 /// Delete the source entity if no alias still points to it and no transaction references it.
 /// Returns true if deleted.
 async fn maybe_delete_orphan(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     scope: &str,
     entity_id: Uuid,
@@ -822,50 +754,58 @@ async fn maybe_delete_orphan(
     let (entity_table, tx_fk) = scope_meta(scope).unwrap();
 
     // Check alias references.
-    let alias_count: i64 = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM aliases WHERE owner_id = $1 AND scope = $2 AND target_id = $3",
-    )
-    .bind(owner_id)
-    .bind(scope)
-    .bind(entity_id)
-    .fetch_one(&mut *conn)
+    #[derive(FromQueryResult)]
+    struct CountRow { count: i64 }
+
+    let alias_count = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        "SELECT COUNT(*)::bigint AS count FROM aliases WHERE owner_id = $1 AND scope = $2 AND target_id = $3",
+        [owner_id.into(), scope.into(), entity_id.into()],
+    ))
+    .one(txn)
     .await
-    .map_err(AppError::Database)?;
+    .map_err(AppError::Orm)?
+    .map(|r| r.count)
+    .unwrap_or(0);
 
     if alias_count > 0 {
         return Ok(false);
     }
 
     // Check transaction references using the scope FK column.
-    // We use a dynamic query here because the FK column name varies by scope.
-    // The column name comes from scope_meta() which is validated against a whitelist — safe.
+    // Column name comes from scope_meta() which is validated against a whitelist — safe.
     let tx_count_sql = format!(
-        "SELECT COUNT(*) FROM transactions WHERE owner_id = $1 AND {} = $2",
+        "SELECT COUNT(*)::bigint AS count FROM transactions WHERE owner_id = $1 AND {} = $2",
         tx_fk
     );
-    let tx_count: i64 = sqlx::query_scalar::<_, i64>(&tx_count_sql)
-        .bind(owner_id)
-        .bind(entity_id)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(AppError::Database)?;
+    let tx_count = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        &tx_count_sql,
+        [owner_id.into(), entity_id.into()],
+    ))
+    .one(txn)
+    .await
+    .map_err(AppError::Orm)?
+    .map(|r| r.count)
+    .unwrap_or(0);
 
     if tx_count > 0 {
         return Ok(false);
     }
 
     // Safe to delete: no alias and no transaction references.
-    // Column names are from the scope_meta whitelist — not from user input.
+    // Table and column names are from the scope_meta whitelist — not from user input.
     let delete_sql = format!(
         "DELETE FROM {} WHERE id = $1 AND owner_id = $2",
         entity_table
     );
-    sqlx::query(&delete_sql)
-        .bind(entity_id)
-        .bind(owner_id)
-        .execute(&mut *conn)
-        .await
-        .map_err(AppError::Database)?;
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        &delete_sql,
+        [entity_id.into(), owner_id.into()],
+    ))
+    .await
+    .map_err(AppError::Orm)?;
 
     Ok(true)
 }
@@ -873,67 +813,64 @@ async fn maybe_delete_orphan(
 /// Set review_state = 'confirmed' for an entity, returning the resulting state.
 /// Idempotent: re-confirming an already-confirmed entity returns 200 with 'confirmed'.
 /// Returns Err(NotFound) if the entity does not exist for this owner.
-async fn confirm_entity(
-    conn: &mut PgConnection,
+/// Works on both DatabaseTransaction and DatabaseConnection via ConnectionTrait.
+async fn confirm_entity<C: ConnectionTrait>(
+    conn: &C,
     owner_id: Uuid,
     scope: &str,
     entity_id: Uuid,
 ) -> Result<String, AppError> {
     match scope {
         "category" => {
-            let row = sqlx::query!(
-                r#"UPDATE categories SET review_state = 'confirmed'
-                   WHERE id = $1 AND owner_id = $2
-                   RETURNING review_state AS "rs!""#,
-                entity_id,
-                owner_id,
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
-            row.map(|r| r.rs)
-                .ok_or_else(|| AppError::NotFound(format!("Category {} not found", entity_id)))
+            let row = Categories::find_by_id(entity_id)
+                .filter(categories::Column::OwnerId.eq(owner_id))
+                .one(conn)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("Category {} not found", entity_id)))?;
+
+            let mut active: categories::ActiveModel = row.into();
+            active.review_state = Set("confirmed".to_string());
+            let updated = active.update(conn).await?;
+            Ok(updated.review_state)
         }
 
         "merchant" => {
-            let row = sqlx::query!(
-                r#"UPDATE merchants SET review_state = 'confirmed'
-                   WHERE id = $1 AND owner_id = $2
-                   RETURNING review_state AS "rs!""#,
-                entity_id,
-                owner_id,
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
-            row.map(|r| r.rs)
-                .ok_or_else(|| AppError::NotFound(format!("Merchant {} not found", entity_id)))
+            let row = Merchants::find_by_id(entity_id)
+                .filter(merchants::Column::OwnerId.eq(owner_id))
+                .one(conn)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("Merchant {} not found", entity_id)))?;
+
+            let mut active: merchants::ActiveModel = row.into();
+            active.review_state = Set("confirmed".to_string());
+            let updated = active.update(conn).await?;
+            Ok(updated.review_state)
         }
 
         "product" => {
-            let row = sqlx::query!(
-                r#"UPDATE products SET review_state = 'confirmed'
-                   WHERE id = $1 AND owner_id = $2
-                   RETURNING review_state AS "rs!""#,
-                entity_id,
-                owner_id,
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
-            row.map(|r| r.rs)
-                .ok_or_else(|| AppError::NotFound(format!("Product {} not found", entity_id)))
+            let row = Products::find_by_id(entity_id)
+                .filter(products::Column::OwnerId.eq(owner_id))
+                .one(conn)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("Product {} not found", entity_id)))?;
+
+            let mut active: products::ActiveModel = row.into();
+            active.review_state = Set("confirmed".to_string());
+            let updated = active.update(conn).await?;
+            Ok(updated.review_state)
         }
 
         "payment_method" => {
-            let row = sqlx::query!(
-                r#"UPDATE payment_methods SET review_state = 'confirmed'
-                   WHERE id = $1 AND owner_id = $2
-                   RETURNING review_state AS "rs!""#,
-                entity_id,
-                owner_id,
-            )
-            .fetch_optional(&mut *conn)
-            .await?;
-            row.map(|r| r.rs)
-                .ok_or_else(|| AppError::NotFound(format!("Payment method {} not found", entity_id)))
+            let row = PaymentMethods::find_by_id(entity_id)
+                .filter(payment_methods::Column::OwnerId.eq(owner_id))
+                .one(conn)
+                .await?
+                .ok_or_else(|| AppError::NotFound(format!("Payment method {} not found", entity_id)))?;
+
+            let mut active: payment_methods::ActiveModel = row.into();
+            active.review_state = Set("confirmed".to_string());
+            let updated = active.update(conn).await?;
+            Ok(updated.review_state)
         }
 
         _ => Err(AppError::BadRequest(format!(

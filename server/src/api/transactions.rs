@@ -4,8 +4,8 @@ use axum::{
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -54,37 +54,63 @@ pub struct TransactionsResponse {
     pub total: usize,
 }
 
+/// Flat row fetched from the DB — matched to TransactionItem fields (children excluded).
+#[derive(Debug, FromQueryResult)]
+struct TxRow {
+    id: Uuid,
+    group_id: Uuid,
+    occurred_on: NaiveDate,
+    merchant_id: Option<Uuid>,
+    merchant_name: Option<String>,
+    actor_id: Option<Uuid>,
+    actor_name: Option<String>,
+    category_id: Option<Uuid>,
+    category_name: Option<String>,
+    product_id: Option<Uuid>,
+    product_name: Option<String>,
+    payment_method_id: Option<Uuid>,
+    payment_method_name: Option<String>,
+    amount: Decimal,
+    unit_price: Option<Decimal>,
+    quantity: Option<Decimal>,
+    memo: Option<String>,
+}
+
 /// GET /api/transactions
 /// 필터: from/to/category/actor/merchant/payment/product/group
 /// multi-line 그룹은 group_id로 묶어 children 배열로 반환
+///
+/// Uses raw SQL via Statement because the query joins 5 tables and applies
+/// nullable optional filters (`$N::type IS NULL OR col = $N`) — a pattern
+/// that does not compose cleanly through SeaORM's SelectModel.
 pub async fn handle_get_transactions(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(q): Query<TransactionQuery>,
 ) -> AppResult<Json<TransactionsResponse>> {
     let owner_id = user.sub;
 
-    // sqlx query! 매크로에서 LEFT JOIN nullable 컬럼은 "col?" 타입 힌트 필요
-    let rows = sqlx::query!(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            t.id           AS "id!: Uuid",
-            t.group_id     AS "group_id!: Uuid",
-            t.occurred_on  AS "occurred_on!: NaiveDate",
-            t.merchant_id  AS "merchant_id?: Uuid",
-            m.name         AS "merchant_name?: String",
-            t.actor_id     AS "actor_id?: Uuid",
-            a.name         AS "actor_name?: String",
-            t.category_id  AS "category_id?: Uuid",
-            c.name         AS "category_name?: String",
-            t.product_id   AS "product_id?: Uuid",
-            p.name         AS "product_name?: String",
-            t.payment_method_id AS "payment_method_id?: Uuid",
-            pm.name        AS "payment_method_name?: String",
-            t.amount       AS "amount!: Decimal",
-            t.unit_price   AS "unit_price?: Decimal",
-            t.quantity     AS "quantity?: Decimal",
-            t.memo
+            t.id           AS id,
+            t.group_id     AS group_id,
+            t.occurred_on  AS occurred_on,
+            t.merchant_id  AS merchant_id,
+            m.name         AS merchant_name,
+            t.actor_id     AS actor_id,
+            a.name         AS actor_name,
+            t.category_id  AS category_id,
+            c.name         AS category_name,
+            t.product_id   AS product_id,
+            p.name         AS product_name,
+            t.payment_method_id AS payment_method_id,
+            pm.name        AS payment_method_name,
+            t.amount       AS amount,
+            t.unit_price   AS unit_price,
+            t.quantity     AS quantity,
+            t.memo         AS memo
         FROM transactions t
         LEFT JOIN merchants m     ON m.id  = t.merchant_id     AND m.owner_id  = t.owner_id
         LEFT JOIN ledger_actors a ON a.id  = t.actor_id        AND a.owner_id  = t.owner_id
@@ -102,18 +128,20 @@ pub async fn handle_get_transactions(
           AND ($9::uuid IS NULL OR t.group_id = $9)
         ORDER BY t.occurred_on DESC, t.id
         "#,
-        owner_id,
-        q.from as Option<NaiveDate>,
-        q.to as Option<NaiveDate>,
-        q.category as Option<String>,
-        q.actor as Option<String>,
-        q.merchant as Option<String>,
-        q.payment as Option<String>,
-        q.product as Option<String>,
-        q.group as Option<Uuid>,
-    )
-    .fetch_all(&*pool)
-    .await?;
+        [
+            owner_id.into(),
+            q.from.into(),
+            q.to.into(),
+            q.category.into(),
+            q.actor.into(),
+            q.merchant.into(),
+            q.payment.into(),
+            q.product.into(),
+            q.group.into(),
+        ],
+    );
+
+    let rows = TxRow::find_by_statement(stmt).all(&*db).await?;
 
     // group_id별로 묶기
     let mut group_map: HashMap<Uuid, Vec<TransactionItem>> = HashMap::new();

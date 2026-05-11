@@ -1,10 +1,19 @@
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
-use sqlx::PgConnection;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, ConnectionTrait,
+    DatabaseBackend, DatabaseTransaction, EntityTrait, FromQueryResult, QueryFilter,
+    Statement, sea_query::OnConflict,
+};
 use uuid::Uuid;
 
 use crate::domain::{IntegrityWarning, RawRow, TransactionRow, UnresolvedAlias};
 use crate::import::normalize::to_norm_key;
+use crate::entity::{
+    aliases, categories, ledger_actors, merchants, payment_methods, products,
+    transactions_raw,
+    prelude::*,
+};
 
 // ── Atomic upsert helpers ────────────────────────────────────────────────────
 //
@@ -22,20 +31,19 @@ use crate::import::normalize::to_norm_key;
 /// "차감" rule: norm == "차감" gets review_state='confirmed' on first creation.
 /// DO NOTHING ensures an existing 'confirmed' row is never downgraded.
 async fn upsert_category(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     raw_text: &str,
 ) -> Result<(Uuid, bool)> {
     let norm = to_norm_key(raw_text);
 
     // 1. Alias lookup (cheapest path).
-    let existing = sqlx::query!(
-        r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'category' AND norm_key = $2"#,
-        owner_id,
-        norm
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let existing = Aliases::find()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq("category"))
+        .filter(aliases::Column::NormKey.eq(&norm))
+        .one(txn)
+        .await?;
 
     if let Some(row) = existing {
         return Ok((row.target_id, false));
@@ -57,231 +65,284 @@ async fn upsert_category(
         "expense"
     };
 
-    // 2. INSERT targeting the partial index; fallback SELECT on conflict.
-    let cat_id_opt: Option<Uuid> = sqlx::query_scalar!(
-        r#"INSERT INTO categories (owner_id, name, kind, review_state)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (owner_id, name) WHERE parent_id IS NULL DO NOTHING
-           RETURNING id"#,
-        owner_id,
-        norm,
-        kind,
-        review_state,
-    )
-    .fetch_optional(&mut *conn)
-    .await
-    .context("category INSERT failed")?;
+    // 2. INSERT targeting the partial index; fallback SELECT on conflict. (Pattern B)
+    let new_id_opt: Option<Uuid> = txn
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"INSERT INTO categories (owner_id, name, kind, review_state)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (owner_id, name) WHERE parent_id IS NULL DO NOTHING
+               RETURNING id"#,
+            [
+                owner_id.into(),
+                norm.clone().into(),
+                kind.into(),
+                review_state.into(),
+            ],
+        ))
+        .await
+        .context("category INSERT failed")?
+        .map(|r| r.try_get::<Uuid>("", "id"))
+        .transpose()?;
 
-    let (cat_id, is_new) = match cat_id_opt {
+    let (cat_id, is_new) = match new_id_opt {
         Some(id) => (id, true),
         None => {
-            let id = sqlx::query_scalar!(
-                r#"SELECT id FROM categories WHERE owner_id = $1 AND name = $2 AND parent_id IS NULL"#,
-                owner_id,
-                norm
-            )
-            .fetch_one(&mut *conn)
-            .await
-            .context("category conflict-fallback SELECT failed")?;
-            (id, false)
+            let row = Categories::find()
+                .filter(categories::Column::OwnerId.eq(owner_id))
+                .filter(categories::Column::Name.eq(&norm))
+                .filter(categories::Column::ParentId.is_null())
+                .one(txn)
+                .await?
+                .context("category conflict-fallback SELECT failed")?;
+            (row.id, false)
         }
     };
 
-    // 3. Register alias.
-    sqlx::query!(
-        r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
-           VALUES ($1, 'category', $2, $3, $4)
-           ON CONFLICT (owner_id, scope, norm_key) DO NOTHING"#,
-        owner_id,
-        raw_text,
-        norm,
-        cat_id,
+    // 3. Register alias. (Pattern C)
+    Aliases::insert(aliases::ActiveModel {
+        owner_id: Set(owner_id),
+        scope: Set("category".into()),
+        raw_text: Set(raw_text.to_string()),
+        norm_key: Set(norm),
+        target_id: Set(cat_id),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            aliases::Column::OwnerId,
+            aliases::Column::Scope,
+            aliases::Column::NormKey,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .execute(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await
+    .ok(); // ignore RecordNotInserted (conflict = already exists, which is fine)
 
     Ok((cat_id, is_new))
 }
 
 async fn upsert_merchant(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     raw_text: &str,
 ) -> Result<(Uuid, bool)> {
     let norm = to_norm_key(raw_text);
 
     // 1. Alias lookup.
-    let existing = sqlx::query!(
-        r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'merchant' AND norm_key = $2"#,
-        owner_id,
-        norm
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let existing = Aliases::find()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq("merchant"))
+        .filter(aliases::Column::NormKey.eq(&norm))
+        .one(txn)
+        .await?;
 
     if let Some(row) = existing {
         return Ok((row.target_id, false));
     }
 
-    // 2. Atomic INSERT with fallback SELECT.
+    // 2. Atomic INSERT with fallback SELECT. (Pattern A)
     //    merchants.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly.
-    let merch_id: Option<Uuid> = sqlx::query_scalar!(
-        r#"INSERT INTO merchants (owner_id, name, review_state)
-           VALUES ($1, $2, 'pending')
-           ON CONFLICT (owner_id, name) DO NOTHING
-           RETURNING id"#,
-        owner_id,
-        norm,
+    let result = Merchants::insert(merchants::ActiveModel {
+        owner_id: Set(owner_id),
+        name: Set(norm.clone()),
+        review_state: Set("pending".into()),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            merchants::Column::OwnerId,
+            merchants::Column::Name,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .fetch_optional(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await;
 
-    let (merch_id, is_new) = match merch_id {
-        Some(id) => (id, true),
-        None => {
-            let id = sqlx::query_scalar!(
-                r#"SELECT id FROM merchants WHERE owner_id = $1 AND name = $2"#,
-                owner_id,
-                norm
-            )
-            .fetch_one(&mut *conn)
-            .await
-            .context("merchant conflict-fallback SELECT failed")?;
-            (id, false)
+    let (merch_id, is_new) = match result {
+        Ok(r) => (r.last_insert_id, true),
+        Err(sea_orm::DbErr::RecordNotInserted) => {
+            let row = Merchants::find()
+                .filter(merchants::Column::OwnerId.eq(owner_id))
+                .filter(merchants::Column::Name.eq(&norm))
+                .one(txn)
+                .await?
+                .context("merchant conflict-fallback SELECT failed")?;
+            (row.id, false)
         }
+        Err(e) => return Err(e.into()),
     };
 
-    sqlx::query!(
-        r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
-           VALUES ($1, 'merchant', $2, $3, $4)
-           ON CONFLICT (owner_id, scope, norm_key) DO NOTHING"#,
-        owner_id,
-        raw_text,
-        norm,
-        merch_id,
+    // Register alias. (Pattern C)
+    Aliases::insert(aliases::ActiveModel {
+        owner_id: Set(owner_id),
+        scope: Set("merchant".into()),
+        raw_text: Set(raw_text.to_string()),
+        norm_key: Set(norm),
+        target_id: Set(merch_id),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            aliases::Column::OwnerId,
+            aliases::Column::Scope,
+            aliases::Column::NormKey,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .execute(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await
+    .ok();
 
     Ok((merch_id, is_new))
 }
 
 async fn upsert_actor(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     raw_text: &str,
 ) -> Result<(Uuid, bool)> {
     let norm = to_norm_key(raw_text);
 
-    let existing = sqlx::query!(
-        r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'actor' AND norm_key = $2"#,
-        owner_id,
-        norm
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let existing = Aliases::find()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq("actor"))
+        .filter(aliases::Column::NormKey.eq(&norm))
+        .one(txn)
+        .await?;
 
     if let Some(row) = existing {
         return Ok((row.target_id, false));
     }
 
-    // ledger_actors.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly.
-    let actor_id: Option<Uuid> = sqlx::query_scalar!(
-        r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, $2)
-           ON CONFLICT (owner_id, name) DO NOTHING
-           RETURNING id"#,
-        owner_id,
-        norm,
+    // ledger_actors.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly. (Pattern A)
+    let result = LedgerActors::insert(ledger_actors::ActiveModel {
+        owner_id: Set(owner_id),
+        name: Set(norm.clone()),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            ledger_actors::Column::OwnerId,
+            ledger_actors::Column::Name,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .fetch_optional(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await;
 
-    let (actor_id, is_new) = match actor_id {
-        Some(id) => (id, true),
-        None => {
-            let id = sqlx::query_scalar!(
-                r#"SELECT id FROM ledger_actors WHERE owner_id = $1 AND name = $2"#,
-                owner_id,
-                norm
-            )
-            .fetch_one(&mut *conn)
-            .await
-            .context("actor conflict-fallback SELECT failed")?;
-            (id, false)
+    let (actor_id, is_new) = match result {
+        Ok(r) => (r.last_insert_id, true),
+        Err(sea_orm::DbErr::RecordNotInserted) => {
+            let row = LedgerActors::find()
+                .filter(ledger_actors::Column::OwnerId.eq(owner_id))
+                .filter(ledger_actors::Column::Name.eq(&norm))
+                .one(txn)
+                .await?
+                .context("actor conflict-fallback SELECT failed")?;
+            (row.id, false)
         }
+        Err(e) => return Err(e.into()),
     };
 
-    sqlx::query!(
-        r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
-           VALUES ($1, 'actor', $2, $3, $4)
-           ON CONFLICT (owner_id, scope, norm_key) DO NOTHING"#,
-        owner_id,
-        raw_text,
-        norm,
-        actor_id,
+    Aliases::insert(aliases::ActiveModel {
+        owner_id: Set(owner_id),
+        scope: Set("actor".into()),
+        raw_text: Set(raw_text.to_string()),
+        norm_key: Set(norm),
+        target_id: Set(actor_id),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            aliases::Column::OwnerId,
+            aliases::Column::Scope,
+            aliases::Column::NormKey,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .execute(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await
+    .ok();
 
     Ok((actor_id, is_new))
 }
 
 async fn upsert_payment_method(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     raw_text: &str,
 ) -> Result<(Uuid, bool)> {
     let norm = to_norm_key(raw_text);
 
-    let existing = sqlx::query!(
-        r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'payment_method' AND norm_key = $2"#,
-        owner_id,
-        norm
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let existing = Aliases::find()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq("payment_method"))
+        .filter(aliases::Column::NormKey.eq(&norm))
+        .one(txn)
+        .await?;
 
     if let Some(row) = existing {
         return Ok((row.target_id, false));
     }
 
-    // payment_methods.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly.
-    let pm_id: Option<Uuid> = sqlx::query_scalar!(
-        r#"INSERT INTO payment_methods (owner_id, name) VALUES ($1, $2)
-           ON CONFLICT (owner_id, name) DO NOTHING
-           RETURNING id"#,
-        owner_id,
-        norm,
+    // payment_methods.UNIQUE (owner_id, name) has no NULLs — ON CONFLICT works directly. (Pattern A)
+    let result = PaymentMethods::insert(payment_methods::ActiveModel {
+        owner_id: Set(owner_id),
+        name: Set(norm.clone()),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            payment_methods::Column::OwnerId,
+            payment_methods::Column::Name,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .fetch_optional(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await;
 
-    let (pm_id, is_new) = match pm_id {
-        Some(id) => (id, true),
-        None => {
-            let id = sqlx::query_scalar!(
-                r#"SELECT id FROM payment_methods WHERE owner_id = $1 AND name = $2"#,
-                owner_id,
-                norm
-            )
-            .fetch_one(&mut *conn)
-            .await
-            .context("payment_method conflict-fallback SELECT failed")?;
-            (id, false)
+    let (pm_id, is_new) = match result {
+        Ok(r) => (r.last_insert_id, true),
+        Err(sea_orm::DbErr::RecordNotInserted) => {
+            let row = PaymentMethods::find()
+                .filter(payment_methods::Column::OwnerId.eq(owner_id))
+                .filter(payment_methods::Column::Name.eq(&norm))
+                .one(txn)
+                .await?
+                .context("payment_method conflict-fallback SELECT failed")?;
+            (row.id, false)
         }
+        Err(e) => return Err(e.into()),
     };
 
-    sqlx::query!(
-        r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
-           VALUES ($1, 'payment_method', $2, $3, $4)
-           ON CONFLICT (owner_id, scope, norm_key) DO NOTHING"#,
-        owner_id,
-        raw_text,
-        norm,
-        pm_id,
+    Aliases::insert(aliases::ActiveModel {
+        owner_id: Set(owner_id),
+        scope: Set("payment_method".into()),
+        raw_text: Set(raw_text.to_string()),
+        norm_key: Set(norm),
+        target_id: Set(pm_id),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            aliases::Column::OwnerId,
+            aliases::Column::Scope,
+            aliases::Column::NormKey,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .execute(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await
+    .ok();
 
     Ok((pm_id, is_new))
 }
@@ -291,7 +352,7 @@ async fn upsert_payment_method(
 /// The partial index `products_owner_merchant_name_uniq` on (owner_id, merchant_id, name)
 /// WHERE merchant_id IS NOT NULL enables ON CONFLICT without an advisory lock.
 async fn upsert_product(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     merchant_id: Uuid,
     memo: &str,
@@ -299,148 +360,146 @@ async fn upsert_product(
     let norm = to_norm_key(memo);
 
     // Product aliases are keyed only on norm_key (not merchant), matching M1 behavior.
-    let existing = sqlx::query!(
-        r#"SELECT target_id FROM aliases WHERE owner_id = $1 AND scope = 'product' AND norm_key = $2"#,
-        owner_id,
-        norm
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let existing = Aliases::find()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq("product"))
+        .filter(aliases::Column::NormKey.eq(&norm))
+        .one(txn)
+        .await?;
 
     if let Some(row) = existing {
         return Ok((row.target_id, false));
     }
 
-    // INSERT targeting the partial index; fallback SELECT on conflict.
-    let prod_id: Option<Uuid> = sqlx::query_scalar!(
-        r#"INSERT INTO products (owner_id, merchant_id, name, review_state)
-           VALUES ($1, $2, $3, 'pending')
-           ON CONFLICT (owner_id, merchant_id, name) WHERE merchant_id IS NOT NULL DO NOTHING
-           RETURNING id"#,
-        owner_id,
-        merchant_id,
-        norm,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    // INSERT targeting the partial index; fallback SELECT on conflict. (Pattern B)
+    let new_id_opt: Option<Uuid> = txn
+        .query_one(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            r#"INSERT INTO products (owner_id, merchant_id, name, review_state)
+               VALUES ($1, $2, $3, 'pending')
+               ON CONFLICT (owner_id, merchant_id, name) WHERE merchant_id IS NOT NULL DO NOTHING
+               RETURNING id"#,
+            [owner_id.into(), merchant_id.into(), norm.clone().into()],
+        ))
+        .await?
+        .map(|r| r.try_get::<Uuid>("", "id"))
+        .transpose()?;
 
-    let (prod_id, is_new) = match prod_id {
+    let (prod_id, is_new) = match new_id_opt {
         Some(id) => (id, true),
         None => {
-            let id = sqlx::query_scalar!(
-                r#"SELECT id FROM products WHERE owner_id = $1 AND merchant_id = $2 AND name = $3"#,
-                owner_id,
-                merchant_id,
-                norm
-            )
-            .fetch_one(&mut *conn)
-            .await
-            .context("product conflict-fallback SELECT failed")?;
-            (id, false)
+            let row = Products::find()
+                .filter(products::Column::OwnerId.eq(owner_id))
+                .filter(products::Column::MerchantId.eq(merchant_id))
+                .filter(products::Column::Name.eq(&norm))
+                .one(txn)
+                .await?
+                .context("product conflict-fallback SELECT failed")?;
+            (row.id, false)
         }
     };
 
-    sqlx::query!(
-        r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
-           VALUES ($1, 'product', $2, $3, $4)
-           ON CONFLICT (owner_id, scope, norm_key) DO NOTHING"#,
-        owner_id,
-        memo,
-        norm,
-        prod_id,
+    Aliases::insert(aliases::ActiveModel {
+        owner_id: Set(owner_id),
+        scope: Set("product".into()),
+        raw_text: Set(memo.to_string()),
+        norm_key: Set(norm),
+        target_id: Set(prod_id),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            aliases::Column::OwnerId,
+            aliases::Column::Scope,
+            aliases::Column::NormKey,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .execute(&mut *conn)
-    .await?;
+    .exec(txn)
+    .await
+    .ok();
 
     Ok((prod_id, is_new))
 }
 
-/// Insert one row into transactions_raw.
+/// Insert one row into transactions_raw. (Pattern D)
 async fn insert_raw(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     batch_id: Uuid,
     row: &RawRow,
 ) -> Result<Uuid> {
-    let raw_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO transactions_raw (
-            owner_id, import_batch_id, row_index, group_id, is_group_header,
-            occurred_on, raw_date_serial, merchant_text, actor_text, category_text,
-            total_amount, memo, unit_price, quantity, line_amount,
-            payment_text, evidence_text, extras
-        ) VALUES (
-            $1, $2, $3, $4, $5,
-            $6, $7, $8, $9, $10,
-            $11, $12, $13, $14, $15,
-            $16, $17, $18
-        ) RETURNING id"#,
-        owner_id,
-        batch_id,
-        row.row_index,
-        row.group_id,
-        row.is_group_header,
-        row.occurred_on,
-        row.raw_date_serial,
-        row.merchant_text,
-        row.actor_text,
-        row.category_text,
-        row.total_amount,
-        row.memo,
-        row.unit_price,
-        row.quantity,
-        row.line_amount,
-        row.payment_text,
-        row.evidence_text,
-        row.extras,
-    )
-    .fetch_one(&mut *conn)
+    let inserted = transactions_raw::ActiveModel {
+        owner_id: Set(owner_id),
+        import_batch_id: Set(batch_id),
+        row_index: Set(row.row_index),
+        group_id: Set(row.group_id),
+        is_group_header: Set(row.is_group_header),
+        occurred_on: Set(row.occurred_on),
+        raw_date_serial: Set(row.raw_date_serial),
+        merchant_text: Set(row.merchant_text.clone()),
+        actor_text: Set(row.actor_text.clone()),
+        category_text: Set(row.category_text.clone()),
+        total_amount: Set(row.total_amount),
+        memo: Set(row.memo.clone()),
+        unit_price: Set(row.unit_price),
+        quantity: Set(row.quantity),
+        line_amount: Set(row.line_amount),
+        payment_text: Set(row.payment_text.clone()),
+        evidence_text: Set(row.evidence_text.clone()),
+        extras: Set(row.extras.clone()),
+        ..Default::default()
+    }
+    .insert(txn)
     .await?;
-    Ok(raw_id)
+    Ok(inserted.id)
 }
 
-/// Insert one row into transactions.
+/// Insert one row into transactions. (Pattern D)
 async fn insert_transaction(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     t: &TransactionRow,
 ) -> Result<Uuid> {
-    let txn_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO transactions (
-            owner_id, raw_id, group_id, occurred_on,
-            merchant_id, actor_id, category_id, product_id, payment_method_id,
-            amount, unit_price, quantity, memo
-        ) VALUES (
-            $1, $2, $3, $4,
-            $5, $6, $7, $8, $9,
-            $10, $11, $12, $13
-        ) RETURNING id"#,
-        owner_id,
-        t.raw_id,
-        t.group_id,
-        t.occurred_on,
-        t.merchant_id,
-        t.actor_id,
-        t.category_id,
-        t.product_id,
-        t.payment_method_id,
-        t.amount,
-        t.unit_price,
-        t.quantity,
-        t.memo,
-    )
-    .fetch_one(&mut *conn)
+    use crate::entity::transactions;
+    let inserted = transactions::ActiveModel {
+        owner_id: Set(owner_id),
+        raw_id: Set(t.raw_id),
+        group_id: Set(t.group_id),
+        occurred_on: Set(t.occurred_on),
+        merchant_id: Set(t.merchant_id),
+        actor_id: Set(t.actor_id),
+        category_id: Set(t.category_id),
+        product_id: Set(t.product_id),
+        payment_method_id: Set(t.payment_method_id),
+        amount: Set(t.amount),
+        unit_price: Set(t.unit_price),
+        quantity: Set(t.quantity),
+        memo: Set(t.memo.clone()),
+        ..Default::default()
+    }
+    .insert(txn)
     .await?;
-    Ok(txn_id)
+    Ok(inserted.id)
 }
 
 /// Group-sum integrity check (PLAN §1).
-/// Returns 0 rows on success; non-zero rows are surfaced as warnings.
+/// Returns 0 rows on success; non-zero rows are surfaced as warnings. (Pattern F)
 pub async fn check_group_integrity(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     batch_id: Uuid,
 ) -> Result<Vec<IntegrityWarning>> {
-    let rows = sqlx::query!(
+    #[derive(sea_orm::FromQueryResult)]
+    struct IntegrityRow {
+        group_id: Uuid,
+        header_total: Option<Decimal>,
+        lines_sum: Option<Decimal>,
+    }
+
+    let rows = IntegrityRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"
         SELECT
             g.group_id,
@@ -457,10 +516,9 @@ pub async fn check_group_integrity(
         GROUP BY g.group_id, g.header_total
         HAVING g.header_total <> COALESCE(-SUM(t.amount), 0)
         "#,
-        owner_id,
-        batch_id,
-    )
-    .fetch_all(&mut *conn)
+        [owner_id.into(), batch_id.into()],
+    ))
+    .all(txn)
     .await?;
 
     let warnings = rows
@@ -476,9 +534,9 @@ pub async fn check_group_integrity(
 }
 
 /// Full import pipeline: raw insert → normalize → transaction rows → integrity check.
-/// All queries run inside the caller-managed transaction (conn).
+/// All queries run inside the caller-managed transaction (txn).
 pub async fn run_pipeline(
-    conn: &mut PgConnection,
+    txn: &DatabaseTransaction,
     owner_id: Uuid,
     batch_id: Uuid,
     rows: Vec<RawRow>,
@@ -488,7 +546,7 @@ pub async fn run_pipeline(
 
     for row in &rows {
         // 1. Store raw row.
-        let raw_id = insert_raw(conn, owner_id, batch_id, row)
+        let raw_id = insert_raw(txn, owner_id, batch_id, row)
             .await
             .context("Failed to insert raw row")?;
 
@@ -517,7 +575,7 @@ pub async fn run_pipeline(
 
         // merchant
         let merchant_id = if let Some(ref text) = row.merchant_text {
-            let (id, is_new) = upsert_merchant(conn, owner_id, text).await?;
+            let (id, is_new) = upsert_merchant(txn, owner_id, text).await?;
             if is_new {
                 unresolved.push(UnresolvedAlias {
                     scope: "merchant".to_string(),
@@ -532,7 +590,7 @@ pub async fn run_pipeline(
 
         // actor
         let actor_id = if let Some(ref text) = row.actor_text {
-            let (id, _) = upsert_actor(conn, owner_id, text).await?;
+            let (id, _) = upsert_actor(txn, owner_id, text).await?;
             Some(id)
         } else {
             None
@@ -548,7 +606,7 @@ pub async fn run_pipeline(
             } else {
                 text.clone()
             };
-            let (id, is_new) = upsert_category(conn, owner_id, &resolved_text).await?;
+            let (id, is_new) = upsert_category(txn, owner_id, &resolved_text).await?;
             if is_new {
                 unresolved.push(UnresolvedAlias {
                     scope: "category".to_string(),
@@ -563,7 +621,7 @@ pub async fn run_pipeline(
 
         // payment_method
         let payment_method_id = if let Some(ref text) = row.payment_text {
-            let (id, _) = upsert_payment_method(conn, owner_id, text).await?;
+            let (id, _) = upsert_payment_method(txn, owner_id, text).await?;
             Some(id)
         } else {
             None
@@ -572,7 +630,7 @@ pub async fn run_pipeline(
         // 5. Product mapping (memo-bearing rows only).
         let product_id = if let (Some(ref memo), Some(merch_id)) = (&row.memo, merchant_id) {
             if !memo.is_empty() {
-                let (id, is_new) = upsert_product(conn, owner_id, merch_id, memo).await?;
+                let (id, is_new) = upsert_product(txn, owner_id, merch_id, memo).await?;
                 if is_new {
                     unresolved.push(UnresolvedAlias {
                         scope: "product".to_string(),
@@ -604,12 +662,12 @@ pub async fn run_pipeline(
             memo: row.memo.clone(),
         };
 
-        insert_transaction(conn, owner_id, &t).await?;
+        insert_transaction(txn, owner_id, &t).await?;
         transactions_inserted += 1;
     }
 
     // 7. Group-sum integrity check (within the same transaction).
-    let integrity_warnings = check_group_integrity(conn, owner_id, batch_id).await?;
+    let integrity_warnings = check_group_integrity(txn, owner_id, batch_id).await?;
 
     if !integrity_warnings.is_empty() {
         tracing::warn!(

@@ -2,20 +2,24 @@
 ///
 /// Verifies kind flipping, invalid-value rejection, and 차감 protection.
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
-use sqlx::PgPool;
+use sea_orm::{
+    ConnectionTrait, DatabaseBackend, DatabaseConnection, FromQueryResult, Statement,
+};
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 // ── Router ────────────────────────────────────────────────────────────────────
 
-fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -27,7 +31,7 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/categories/:id/kind",
             routing::patch(finance_manager::api::categories::handle_patch_category_kind),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -39,24 +43,36 @@ fn build_test_router(pool: Arc<PgPool>, owner_id: Uuid) -> Router {
         ))
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+#[derive(FromQueryResult)]
+struct IdRow { id: Uuid }
+
+#[derive(FromQueryResult)]
+struct KindRow { kind: String }
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Happy path: create a category with kind='expense', PATCH to 'income', assert 200 + DB updated.
-#[sqlx::test(migrations = "./migrations")]
-async fn patch_category_kind_flips_value(pool: PgPool) {
+#[tokio::test]
+async fn patch_category_kind_flips_value() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let pool = Arc::new(pool);
+    let db = Arc::clone(&t.db);
 
     // Create a category with kind='expense'
-    let category_id: Uuid = sqlx::query_scalar!(
+    let category_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(&*pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .id;
 
-    let app = build_test_router(Arc::clone(&pool), owner_id);
+    let app = build_test_router(Arc::clone(&db), owner_id);
 
     let body = serde_json::to_vec(&serde_json::json!({"kind": "income"})).unwrap();
     let response = app
@@ -81,34 +97,40 @@ async fn patch_category_kind_flips_value(pool: PgPool) {
     assert_eq!(body["kind"], "income");
 
     // Verify the DB row was actually updated
-    let db_kind: String = sqlx::query_scalar!(
+    let db_kind = KindRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "SELECT kind FROM categories WHERE id = $1 AND owner_id = $2",
-        category_id,
-        owner_id
-    )
-    .fetch_one(&*pool)
+        [category_id.into(), owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .kind;
 
     assert_eq!(db_kind, "income");
 }
 
 /// Invalid kind value should return 400 or 422.
-#[sqlx::test(migrations = "./migrations")]
-async fn patch_category_kind_rejects_invalid_value(pool: PgPool) {
+#[tokio::test]
+async fn patch_category_kind_rejects_invalid_value() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let pool = Arc::new(pool);
+    let db = Arc::clone(&t.db);
 
     // Create a category to target
-    let category_id: Uuid = sqlx::query_scalar!(
+    let category_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(&*pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .id;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
 
     let body = serde_json::to_vec(&serde_json::json!({"kind": "rubbish"})).unwrap();
     let response = app
@@ -133,21 +155,25 @@ async fn patch_category_kind_rejects_invalid_value(pool: PgPool) {
 }
 
 /// 차감 is a protected system category — PATCH to change its kind must return 409.
-#[sqlx::test(migrations = "./migrations")]
-async fn patch_category_kind_protects_deduction(pool: PgPool) {
+#[tokio::test]
+async fn patch_category_kind_protects_deduction() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    let pool = Arc::new(pool);
+    let db = Arc::clone(&t.db);
 
     // Create a 차감 category
-    let category_id: Uuid = sqlx::query_scalar!(
+    let category_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '차감', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(&*pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .id;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
 
     let body = serde_json::to_vec(&serde_json::json!({"kind": "income"})).unwrap();
     let response = app

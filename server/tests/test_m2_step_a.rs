@@ -5,17 +5,24 @@
 /// 3. GET /api/summary/2026/2 per-category sums for 외식 and 차감.
 /// 4. GET /api/settlement/2026/2 deducted_amount = 7500.
 
+mod common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -29,7 +36,7 @@ fn load_golden_bytes() -> Vec<u8> {
     std::fs::read(path).expect("Failed to read golden xlsx fixture")
 }
 
-async fn do_import(pool: &PgPool, owner_id: Uuid) {
+async fn do_import(t: &common::TestDb, owner_id: Uuid) {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
@@ -42,32 +49,31 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
     let raw_rows = parse_xlsx(&bytes, &sheet_name).unwrap();
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await.unwrap();
+    let txn = t.db.begin().await.unwrap();
 
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id"#,
-        owner_id,
-        filename,
-        hash_vec,
-        year,
-        month,
-        row_count,
-    )
-    .fetch_one(&mut *tx)
+    let r = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
     .await
     .unwrap();
+    let batch_id = r.last_insert_id;
 
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+    run_pipeline(&txn, owner_id, batch_id, raw_rows)
         .await
         .unwrap();
 
-    tx.commit().await.unwrap();
+    txn.commit().await.unwrap();
 }
 
 /// Build a test router for a given owner that includes the summary and settlement routes.
-fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
+fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
     let user = AuthUser {
         sub: owner_id,
         email: "test@example.com".to_string(),
@@ -95,7 +101,7 @@ fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
             "/api/payment-methods",
             routing::get(finance_manager::api::categories::handle_get_payment_methods),
         )
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -113,8 +119,12 @@ fn build_test_router(pool: std::sync::Arc<PgPool>, owner_id: Uuid) -> Router {
 /// batch ids) would fail at the import_batches level. Instead, we call
 /// run_pipeline twice with distinct batch ids to force double-normalization.
 /// The second run must return identical entity ids and must not error.
-#[sqlx::test(migrations = "./migrations")]
-async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
+#[derive(FromQueryResult)]
+struct IdNameRow { id: Uuid, name: String }
+
+#[tokio::test]
+async fn atomic_upsert_same_id_on_second_call() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -133,29 +143,32 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
 
     // First import.
     let hash1 = insert_batch("a");
-    let mut tx1 = pool.begin().await.unwrap();
-    let batch1: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash1,
-        row_count,
-    )
-    .fetch_one(&mut *tx1)
+    let tx1 = t.db.begin().await.unwrap();
+    let batch1 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash1),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&tx1)
     .await
-    .unwrap();
-    run_pipeline(&mut *tx1, owner_id, batch1, raw_rows.clone())
+    .unwrap()
+    .last_insert_id;
+    run_pipeline(&tx1, owner_id, batch1, raw_rows.clone())
         .await
         .unwrap();
     tx1.commit().await.unwrap();
 
     // Collect category ids from first run.
-    let cats_after_first: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM categories WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(&pool)
+    let cats_after_first: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM categories WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -164,29 +177,32 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
 
     // Second import — same owner, different file hash.
     let hash2 = insert_batch("b");
-    let mut tx2 = pool.begin().await.unwrap();
-    let batch2: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash2,
-        row_count,
-    )
-    .fetch_one(&mut *tx2)
+    let tx2 = t.db.begin().await.unwrap();
+    let batch2 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash2),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&tx2)
     .await
-    .unwrap();
-    run_pipeline(&mut *tx2, owner_id, batch2, raw_rows)
+    .unwrap()
+    .last_insert_id;
+    run_pipeline(&tx2, owner_id, batch2, raw_rows)
         .await
         .unwrap();
     tx2.commit().await.unwrap();
 
     // Category ids must be identical — no new rows created on second run.
-    let cats_after_second: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM categories WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(&pool)
+    let cats_after_second: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM categories WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -199,11 +215,12 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
     );
 
     // Same check for merchants.
-    let merch_first: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(&pool)
+    let merch_first: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -212,30 +229,33 @@ async fn atomic_upsert_same_id_on_second_call(pool: PgPool) {
 
     // Third import (another suffix) — merchant ids must match.
     let hash3 = insert_batch("c");
-    let mut tx3 = pool.begin().await.unwrap();
+    let tx3 = t.db.begin().await.unwrap();
     let row_count_i32 = raw_rows_clone_count(&bytes, filename);
-    let batch3: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash3,
-        row_count_i32,
-    )
-    .fetch_one(&mut *tx3)
+    let batch3 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash3),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count_i32),
+        ..Default::default()
+    })
+    .exec(&tx3)
     .await
-    .unwrap();
+    .unwrap()
+    .last_insert_id;
     let raw_rows3 = parse_xlsx(&bytes, &extract_sheet_name(filename).unwrap()).unwrap();
-    run_pipeline(&mut *tx3, owner_id, batch3, raw_rows3)
+    run_pipeline(&tx3, owner_id, batch3, raw_rows3)
         .await
         .unwrap();
     tx3.commit().await.unwrap();
 
-    let merch_after: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(&pool)
+    let merch_after: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -255,17 +275,23 @@ fn raw_rows_clone_count(bytes: &[u8], filename: &str) -> i32 {
 
 // ── Test 2: "차감" review_state = 'confirmed' ─────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn chagang_category_has_confirmed_review_state(pool: PgPool) {
-    let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+#[derive(FromQueryResult)]
+struct ReviewStateRow { review_state: String }
 
-    let row = sqlx::query!(
+#[tokio::test]
+async fn chagang_category_has_confirmed_review_state() {
+    let t = common::TestDb::new().await;
+    let owner_id = Uuid::new_v4();
+    do_import(&t, owner_id).await;
+
+    let row = ReviewStateRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'"#,
-        owner_id
-    )
-    .fetch_one(&pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
+    .expect("query failed")
     .expect("차감 category not found");
 
     assert_eq!(
@@ -276,10 +302,11 @@ async fn chagang_category_has_confirmed_review_state(pool: PgPool) {
 }
 
 /// A second import must not downgrade an existing 'confirmed' 차감 row to 'pending'.
-#[sqlx::test(migrations = "./migrations")]
-async fn chagang_review_state_not_downgraded_on_reimport(pool: PgPool) {
+#[tokio::test]
+async fn chagang_review_state_not_downgraded_on_reimport() {
+    let t = common::TestDb::new().await;
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Manually set review_state to 'confirmed' (already should be).
     // Then run a second pipeline to confirm it stays 'confirmed'.
@@ -294,29 +321,33 @@ async fn chagang_review_state_not_downgraded_on_reimport(pool: PgPool) {
     h.update(b"reimport");
     let hash2 = h.finalize().to_vec();
 
-    let mut tx = pool.begin().await.unwrap();
-    let batch2: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash2,
-        row_count,
-    )
-    .fetch_one(&mut *tx)
+    let tx = t.db.begin().await.unwrap();
+    let batch2 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash2),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&tx)
     .await
-    .unwrap();
-    run_pipeline(&mut *tx, owner_id, batch2, raw_rows)
+    .unwrap()
+    .last_insert_id;
+    run_pipeline(&tx, owner_id, batch2, raw_rows)
         .await
         .unwrap();
     tx.commit().await.unwrap();
 
-    let row = sqlx::query!(
+    let row = ReviewStateRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'"#,
-        owner_id
-    )
-    .fetch_one(&pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
+    .expect("query failed")
     .expect("차감 category not found after reimport");
 
     assert_eq!(
@@ -328,13 +359,14 @@ async fn chagang_review_state_not_downgraded_on_reimport(pool: PgPool) {
 
 // ── Test 3: GET /api/summary/2026/2 spot checks ────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn summary_2026_02_spot_check(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn summary_2026_02_spot_check() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/summary/2026/2")
         .body(Body::empty())
@@ -386,13 +418,14 @@ async fn summary_2026_02_spot_check(pool: PgPool) {
 
 // ── Test 4: GET /api/settlement/2026/2 ────────────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn settlement_2026_02_deducted_amount(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn settlement_2026_02_deducted_amount() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/settlement/2026/2")
         .body(Body::empty())
@@ -440,12 +473,13 @@ async fn settlement_2026_02_deducted_amount(pool: PgPool) {
 }
 
 /// Settlement for a month with no data must return zeros (not 404).
-#[sqlx::test(migrations = "./migrations")]
-async fn settlement_empty_month_returns_zeros(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn settlement_empty_month_returns_zeros() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/settlement/2025/1")
         .body(Body::empty())
@@ -468,13 +502,14 @@ async fn settlement_empty_month_returns_zeros(pool: PgPool) {
 
 // ── Test 5: read-only list endpoints ─────────────────────────────────────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn categories_list_returns_data(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn categories_list_returns_data() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/categories")
         .body(Body::empty())
@@ -498,13 +533,14 @@ async fn categories_list_returns_data(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn merchants_list_returns_data(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn merchants_list_returns_data() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/merchants")
         .body(Body::empty())
@@ -520,13 +556,14 @@ async fn merchants_list_returns_data(pool: PgPool) {
     assert!(!arr.is_empty(), "merchants must not be empty");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn payment_methods_list_returns_data(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn payment_methods_list_returns_data() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
-    let app = build_test_router(pool, owner_id);
+    let app = build_test_router(db, owner_id);
     let req = Request::builder()
         .uri("/api/payment-methods")
         .body(Body::empty())

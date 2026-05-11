@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::http::{HeaderName, HeaderValue, Method};
+use migration::MigratorTrait;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -10,6 +11,7 @@ mod auth;
 mod config;
 mod db;
 mod domain;
+mod entity;
 mod error;
 mod import;
 
@@ -30,17 +32,15 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::from_env()?;
     tracing::info!("Starting finance-manager on port {}", config.port);
 
-    // DB 연결 풀 생성
-    let pool = db::create_pool(&config.database_url).await?;
+    // DB 연결
+    let db = db::create_db(&config.database_url).await?;
     tracing::info!("Database connected");
 
-    // sqlx 마이그레이션 자동 실행
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await?;
+    // sea-orm 마이그레이션 자동 실행
+    migration::Migrator::up(&db, None).await?;
     tracing::info!("Migrations applied");
 
-    let pool = Arc::new(pool);
+    let db = Arc::new(db);
 
     // JWKS 클라이언트 초기화 + 부팅 시 prefetch
     let jwks = Arc::new(auth::JwksClient::new(
@@ -81,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 라우터 구성
-    let app = api::router(pool, jwks)
+    let app = api::router(db, jwks)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 

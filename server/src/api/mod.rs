@@ -16,13 +16,13 @@ use axum::{
     routing::{delete, get, patch, post},
     Router,
 };
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 
 use crate::auth::{auth_middleware, JwksClient};
 
 /// Full API router.
-pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
+pub fn router(db: Arc<DatabaseConnection>, jwks: Arc<JwksClient>) -> Router {
     // /api/import allows up to 20 MB; all other routes use the axum default (2 MB).
     let import_route = Router::new()
         .route("/api/import", post(import::handle_import))
@@ -59,7 +59,7 @@ pub fn router(pool: Arc<PgPool>, jwks: Arc<JwksClient>) -> Router {
         )
         .route("/api/merchants", get(categories::handle_get_merchants))
         .route("/api/payment-methods", get(categories::handle_get_payment_methods))
-        .with_state(pool.clone())
+        .with_state(db.clone())
         .layer(middleware::from_fn_with_state(jwks, auth_middleware));
 
     Router::new()

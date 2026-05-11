@@ -2,6 +2,8 @@
 ///
 /// 20MB 제한을 낮게 설정한 별도 라우터를 구성해 body 초과 시 413이 반환되는지 확인한다.
 
+mod common;
+
 use axum::{
     body::Body,
     extract::DefaultBodyLimit,
@@ -9,12 +11,13 @@ use axum::{
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
+use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
 
 fn build_import_router_with_limit(
-    pool: std::sync::Arc<PgPool>,
+    db: Arc<DatabaseConnection>,
     owner_id: Uuid,
     limit_bytes: usize,
 ) -> Router {
@@ -32,7 +35,7 @@ fn build_import_router_with_limit(
         .layer(DefaultBodyLimit::max(limit_bytes));
 
     import_route
-        .with_state(pool)
+        .with_state(db)
         .layer(middleware::from_fn(
             move |mut req: axum::http::Request<Body>, next: middleware::Next| {
                 let user = user.clone();
@@ -49,13 +52,14 @@ fn build_import_router_with_limit(
 /// `DefaultBodyLimit::max(limit_bytes)` 초과 시 axum의 `MultipartError::status()`가
 /// PAYLOAD_TOO_LARGE(413)를 반환하고, handle_import가 이를 `AppError::PayloadTooLarge`로
 /// 변환해 413을 응답해야 한다.
-#[sqlx::test(migrations = "./migrations")]
-async fn import_body_too_large_returns_413(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn import_body_too_large_returns_413() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // 512바이트 제한으로 라우터 구성
-    let app = build_import_router_with_limit(pool, owner_id, 512);
+    let app = build_import_router_with_limit(db, owner_id, 512);
 
     // 유효한 멀티파트 형식이되 크기를 초과하는 body 전송
     let boundary = "testboundary";
@@ -87,13 +91,14 @@ async fn import_body_too_large_returns_413(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn import_empty_body_returns_400(pool: PgPool) {
-    let pool = std::sync::Arc::new(pool);
+#[tokio::test]
+async fn import_empty_body_returns_400() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
 
     // 충분한 limit으로 라우터 구성
-    let app = build_import_router_with_limit(pool, owner_id, 20 * 1024 * 1024);
+    let app = build_import_router_with_limit(db, owner_id, 20 * 1024 * 1024);
 
     // 빈 멀티파트 전송
     let boundary = "----testboundary";

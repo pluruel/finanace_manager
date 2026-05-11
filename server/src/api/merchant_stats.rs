@@ -4,8 +4,8 @@ use axum::{
 };
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -47,13 +47,27 @@ pub struct MerchantStatsResponse {
     pub memo_less_count: i64,
 }
 
+#[derive(FromQueryResult)]
+struct MerchantRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(FromQueryResult)]
+struct MerchantStatsRow {
+    month: NaiveDate,
+    total: Decimal,
+    tx_count: i64,
+    memo_less: i64,
+}
+
 /// GET /api/merchant-stats?merchant_id=&from=&to=&memo_less_only=
 ///
 /// Monthly per-merchant totals. Used as a fallback for memo-less transactions
 /// where unit-price tracking isn't possible (PLAN §6 M3 acceptance criteria —
 /// the 167 memo-less Feb rows are surfaced here).
 pub async fn handle_get_merchant_stats(
-    State(pool): State<Arc<PgPool>>,
+    State(db): State<Arc<DatabaseConnection>>,
     ExtractUser(user): ExtractUser,
     Query(q): Query<MerchantStatsQuery>,
 ) -> AppResult<Json<MerchantStatsResponse>> {
@@ -62,26 +76,27 @@ pub async fn handle_get_merchant_stats(
         .merchant_id
         .ok_or_else(|| AppError::BadRequest("merchant_id is required".into()))?;
 
-    let merchant = sqlx::query!(
+    let merchant = MerchantRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
-        SELECT id AS "id!: Uuid", name AS "name!: String"
+        SELECT id, name
         FROM merchants
         WHERE owner_id = $1 AND id = $2
         "#,
-        owner_id,
-        merchant_id,
-    )
-    .fetch_optional(&*pool)
+        [owner_id.into(), merchant_id.into()],
+    ))
+    .one(&*db)
     .await?
     .ok_or_else(|| AppError::NotFound(format!("merchant {merchant_id}")))?;
 
-    let rows = sqlx::query!(
+    let rows = MerchantStatsRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            date_trunc('month', t.occurred_on)::date     AS "month!: NaiveDate",
-            (-SUM(t.amount))::numeric(15,2)              AS "total!: Decimal",
-            COUNT(*)                                     AS "tx_count!: i64",
-            COUNT(*) FILTER (WHERE t.product_id IS NULL) AS "memo_less!: i64"
+            date_trunc('month', t.occurred_on)::date     AS month,
+            (-SUM(t.amount))::numeric(15,2)              AS total,
+            COUNT(*)                                     AS tx_count,
+            COUNT(*) FILTER (WHERE t.product_id IS NULL) AS memo_less
         FROM transactions t
         JOIN categories c ON c.id = t.category_id AND c.owner_id = t.owner_id
         WHERE t.owner_id = $1
@@ -93,13 +108,15 @@ pub async fn handle_get_merchant_stats(
         GROUP BY date_trunc('month', t.occurred_on)
         ORDER BY 1
         "#,
-        owner_id,
-        merchant_id,
-        q.from as Option<NaiveDate>,
-        q.to as Option<NaiveDate>,
-        q.memo_less_only,
-    )
-    .fetch_all(&*pool)
+        [
+            owner_id.into(),
+            merchant_id.into(),
+            q.from.into(),
+            q.to.into(),
+            q.memo_less_only.into(),
+        ],
+    ))
+    .all(&*db)
     .await?;
 
     let points: Vec<MonthlyMerchantPoint> = rows
