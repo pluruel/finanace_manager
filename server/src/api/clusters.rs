@@ -3,12 +3,15 @@ use axum::{
     Json,
 };
 use sea_orm::{
-    DatabaseBackend, DatabaseConnection, FromQueryResult, Statement,
+    ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
+    FromQueryResult, QueryFilter, Statement, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
+
+use crate::entity::{aliases, merchants, products, prelude::{Aliases, Merchants, Products}};
 
 use crate::auth::ExtractUser;
 use crate::error::{AppError, AppResult};
@@ -269,10 +272,91 @@ pub struct MergeResponse {
 }
 
 pub async fn handle_post_merge(
-    State(_db): State<Arc<DatabaseConnection>>,
-    ExtractUser(_user): ExtractUser,
-    Json(_body): Json<MergeRequest>,
+    State(db): State<Arc<DatabaseConnection>>,
+    ExtractUser(user): ExtractUser,
+    Json(body): Json<MergeRequest>,
 ) -> AppResult<Json<MergeResponse>> {
-    // Implemented in Task 3
-    Err(AppError::NotImplemented)
+    let scope = Scope::parse(&body.scope).ok_or_else(|| {
+        AppError::BadRequest("scope must be 'product' or 'merchant'".into())
+    })?;
+    if body.absorb_ids.is_empty() {
+        return Err(AppError::BadRequest("absorb_ids must not be empty".into()));
+    }
+    if body.absorb_ids.iter().any(|id| *id == body.canonical_id) {
+        return Err(AppError::BadRequest(
+            "canonical_id must not be in absorb_ids".into(),
+        ));
+    }
+
+    let owner_id = user.sub;
+    let txn = db.begin().await?;
+
+    // 1. Lock absorb rows (race protection via SELECT FOR UPDATE)
+    let lock_table = scope.entity_table();
+    let lock_sql = format!(
+        "SELECT id FROM {lock_table} WHERE owner_id = $1 AND id = ANY($2) FOR UPDATE"
+    );
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        &lock_sql,
+        [owner_id.into(), body.absorb_ids.clone().into()],
+    ))
+    .await?;
+
+    // 2. Repoint transactions to canonical
+    let fk = scope.fk_column();
+    let upd_sql = format!(
+        "UPDATE transactions SET {fk} = $1 \
+         WHERE owner_id = $2 AND {fk} = ANY($3)"
+    );
+    let upd_res = txn
+        .execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
+            &upd_sql,
+            [
+                body.canonical_id.into(),
+                owner_id.into(),
+                body.absorb_ids.clone().into(),
+            ],
+        ))
+        .await?;
+    let txn_relinked = upd_res.rows_affected();
+
+    // 3. Delete aliases pointing at absorbed entities
+    let alias_scope = match scope {
+        Scope::Product => "product",
+        Scope::Merchant => "merchant",
+    };
+    let alias_del = Aliases::delete_many()
+        .filter(aliases::Column::OwnerId.eq(owner_id))
+        .filter(aliases::Column::Scope.eq(alias_scope))
+        .filter(aliases::Column::TargetId.is_in(body.absorb_ids.clone()))
+        .exec(&txn)
+        .await?;
+    let aliases_deleted = alias_del.rows_affected;
+
+    // 4. Delete absorbed entities themselves
+    match scope {
+        Scope::Product => {
+            Products::delete_many()
+                .filter(products::Column::OwnerId.eq(owner_id))
+                .filter(products::Column::Id.is_in(body.absorb_ids.clone()))
+                .exec(&txn)
+                .await?;
+        }
+        Scope::Merchant => {
+            Merchants::delete_many()
+                .filter(merchants::Column::OwnerId.eq(owner_id))
+                .filter(merchants::Column::Id.is_in(body.absorb_ids.clone()))
+                .exec(&txn)
+                .await?;
+        }
+    }
+
+    txn.commit().await?;
+    Ok(Json(MergeResponse {
+        merged_count: body.absorb_ids.len(),
+        txn_relinked,
+        aliases_deleted,
+    }))
 }

@@ -211,3 +211,129 @@ async fn clusters_works_for_merchant_scope() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["clusters"].as_array().unwrap().len(), 1);
 }
+
+use serde_json::json;
+use finance_manager::entity::{aliases, prelude::Aliases, transactions, prelude::Transactions};
+use sea_orm::{ColumnTrait, QueryFilter, PaginatorTrait};
+
+#[tokio::test]
+async fn merge_relinks_transactions_and_deletes_absorbed() {
+    let t = common::TestDb::new().await;
+    let owner_id = Uuid::new_v4();
+    do_import(&t, owner_id).await;
+
+    // 골든 데이터에서 같은 가맹점의 두 product 잡기
+    // (어느 쌍이든 cluster에 잡힌 것 중 하나 사용)
+    let app = build_test_router(Arc::clone(&t.db), owner_id);
+    let (_, list) = fetch_json(app, "/api/clusters?scope=product&threshold=0.4").await;
+    let clusters = list["clusters"].as_array().unwrap();
+    assert!(!clusters.is_empty());
+    let first = &clusters[0];
+    let canonical_id: Uuid = serde_json::from_value(first["suggested_canonical_id"].clone()).unwrap();
+    let absorb_ids: Vec<Uuid> = first["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| {
+            let id: Uuid = serde_json::from_value(m["id"].clone()).ok()?;
+            (id != canonical_id).then_some(id)
+        })
+        .collect();
+    assert!(!absorb_ids.is_empty());
+
+    // 병합 전 transaction 수 측정
+    let before_canonical: u64 = Transactions::find()
+        .filter(transactions::Column::OwnerId.eq(owner_id))
+        .filter(transactions::Column::ProductId.eq(canonical_id))
+        .count(&*t.db).await.unwrap();
+    let mut before_absorbed: u64 = 0;
+    for id in &absorb_ids {
+        before_absorbed += Transactions::find()
+            .filter(transactions::Column::OwnerId.eq(owner_id))
+            .filter(transactions::Column::ProductId.eq(*id))
+            .count(&*t.db).await.unwrap();
+    }
+
+    let app = build_test_router(Arc::clone(&t.db), owner_id);
+    let (status, json) = post_json(app, "/api/clusters/merge", json!({
+        "scope": "product",
+        "canonical_id": canonical_id,
+        "absorb_ids": absorb_ids.clone(),
+    })).await;
+    assert_eq!(status, StatusCode::OK, "merge: {json}");
+    assert_eq!(json["merged_count"].as_u64(), Some(absorb_ids.len() as u64));
+
+    // 병합 후 absorb row 모두 사라짐
+    for id in &absorb_ids {
+        let still = Products::find_by_id(*id).one(&*t.db).await.unwrap();
+        assert!(still.is_none(), "absorbed product {id} should be deleted");
+    }
+    // canonical 의 transaction 수 = 이전 합계
+    let after_canonical: u64 = Transactions::find()
+        .filter(transactions::Column::OwnerId.eq(owner_id))
+        .filter(transactions::Column::ProductId.eq(canonical_id))
+        .count(&*t.db).await.unwrap();
+    assert_eq!(after_canonical, before_canonical + before_absorbed);
+}
+
+#[tokio::test]
+async fn merge_deletes_aliases_pointing_to_absorbed() {
+    let t = common::TestDb::new().await;
+    let owner_id = Uuid::new_v4();
+
+    let canonical = insert_product(&t.db, owner_id, "고덕방 아이스아메리카노").await;
+    let absorb = insert_product(&t.db, owner_id, "고덕방 아메리카노").await;
+    // alias 한 개 등록
+    Aliases::insert(aliases::ActiveModel {
+        id: SetVal(Uuid::new_v4()),
+        owner_id: SetVal(owner_id),
+        scope: SetVal("product".into()),
+        raw_text: SetVal("고덕방 아메리카노".into()),
+        norm_key: SetVal("고덕방 아메리카노".into()),
+        target_id: SetVal(absorb),
+    }).exec(&*t.db).await.unwrap();
+
+    let app = build_test_router(Arc::clone(&t.db), owner_id);
+    let (status, json) = post_json(app, "/api/clusters/merge", json!({
+        "scope": "product",
+        "canonical_id": canonical,
+        "absorb_ids": [absorb],
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["aliases_deleted"].as_u64().unwrap() >= 1);
+
+    let remaining = Aliases::find()
+        .filter(aliases::Column::TargetId.eq(absorb))
+        .count(&*t.db).await.unwrap();
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn merge_rejects_canonical_in_absorb_ids() {
+    let t = common::TestDb::new().await;
+    let owner_id = Uuid::new_v4();
+    let id = insert_product(&t.db, owner_id, "X").await;
+
+    let app = build_test_router(Arc::clone(&t.db), owner_id);
+    let (status, _) = post_json(app, "/api/clusters/merge", json!({
+        "scope": "product",
+        "canonical_id": id,
+        "absorb_ids": [id],
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn merge_rejects_empty_absorb_ids() {
+    let t = common::TestDb::new().await;
+    let owner_id = Uuid::new_v4();
+    let id = insert_product(&t.db, owner_id, "X").await;
+
+    let app = build_test_router(Arc::clone(&t.db), owner_id);
+    let (status, _) = post_json(app, "/api/clusters/merge", json!({
+        "scope": "product",
+        "canonical_id": id,
+        "absorb_ids": [],
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
