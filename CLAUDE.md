@@ -89,7 +89,7 @@ NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 
 Deployment / run flow:
 1. `docker compose build`.
-2. `docker compose up -d postgres`, then `sqlx migrate run` (or run automatically from the server container's entrypoint).
+2. `docker compose up -d postgres`. 마이그레이션은 server 컨테이너 부팅 시 `Migrator::up` 이 자동 실행하므로 별도 step 불필요. 수동 적용이 필요하면 `cargo run -p migration -- -u "$DATABASE_URL" up`.
 3. `docker compose up -d server web`.
 4. Health checks: server `/health` returns 200, web `/` renders.
 
