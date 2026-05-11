@@ -13,8 +13,7 @@ use axum::{
 use chrono::NaiveDate;
 use rust_decimal::Decimal;
 use rust_xlsxwriter::{Format, FormatAlign, Workbook};
-use sea_orm::DatabaseConnection;
-use sqlx::PgPool;
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -35,9 +34,8 @@ pub async fn handle_get_export(
         )));
     }
     let owner_id = user.sub;
-    let pool = crate::db::pool_of(&db);
 
-    let bytes = build_workbook(pool, owner_id, year, month).await?;
+    let bytes = build_workbook(&db, owner_id, year, month).await?;
 
     let filename = format!("finance-{:04}-{:02}.xlsx", year, month);
     let disposition = format!("attachment; filename=\"{}\"", filename);
@@ -58,7 +56,7 @@ pub async fn handle_get_export(
 }
 
 async fn build_workbook(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     owner_id: Uuid,
     year: i32,
     month: i32,
@@ -73,7 +71,7 @@ async fn build_workbook(
     let date_fmt = Format::new().set_num_format("yyyy-mm-dd");
 
     // ── Sheet 1: Transactions ────────────────────────────────────────────────
-    let txns = fetch_transactions(pool, owner_id, year, month).await?;
+    let txns = fetch_transactions(db, owner_id, year, month).await?;
     {
         let sheet = wb.add_worksheet().set_name("Transactions").map_err(xlsx_err)?;
         let cols = [
@@ -154,7 +152,7 @@ async fn build_workbook(
     }
 
     // ── Sheet 2: Settlement ──────────────────────────────────────────────────
-    let s = fetch_settlement(pool, owner_id, year, month).await?;
+    let s = fetch_settlement(db, owner_id, year, month).await?;
     {
         let sheet = wb.add_worksheet().set_name("Settlement").map_err(xlsx_err)?;
         sheet
@@ -189,7 +187,7 @@ async fn build_workbook(
     }
 
     // ── Sheet 3: Summary (category × actor pivot) ────────────────────────────
-    let pivot = fetch_summary(pool, owner_id, year, month).await?;
+    let pivot = fetch_summary(db, owner_id, year, month).await?;
     {
         let sheet = wb.add_worksheet().set_name("Summary").map_err(xlsx_err)?;
         sheet
@@ -257,26 +255,42 @@ struct ExportTxn {
     group_id: Uuid,
 }
 
+#[derive(FromQueryResult)]
+struct ExportTxnRow {
+    occurred_on: NaiveDate,
+    merchant: Option<String>,
+    actor: Option<String>,
+    category: Option<String>,
+    kind: Option<String>,
+    payment_method: Option<String>,
+    amount: Decimal,
+    unit_price: Option<Decimal>,
+    quantity: Option<Decimal>,
+    memo: Option<String>,
+    group_id: Uuid,
+}
+
 async fn fetch_transactions(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     owner_id: Uuid,
     year: i32,
     month: i32,
 ) -> Result<Vec<ExportTxn>, AppError> {
-    let rows = sqlx::query!(
+    let rows = ExportTxnRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            t.occurred_on  AS "occurred_on!: NaiveDate",
-            m.name         AS "merchant?: String",
-            a.name         AS "actor?: String",
-            c.name         AS "category?: String",
-            c.kind         AS "kind?: String",
-            pm.name        AS "payment_method?: String",
-            t.amount       AS "amount!: Decimal",
-            t.unit_price   AS "unit_price?: Decimal",
-            t.quantity     AS "quantity?: Decimal",
-            t.memo         AS "memo?: String",
-            t.group_id     AS "group_id!: Uuid"
+            t.occurred_on  AS occurred_on,
+            m.name         AS merchant,
+            a.name         AS actor,
+            c.name         AS category,
+            c.kind         AS kind,
+            pm.name        AS payment_method,
+            t.amount       AS amount,
+            t.unit_price   AS unit_price,
+            t.quantity     AS quantity,
+            t.memo         AS memo,
+            t.group_id     AS group_id
         FROM transactions t
         LEFT JOIN merchants m        ON m.id  = t.merchant_id        AND m.owner_id  = t.owner_id
         LEFT JOIN ledger_actors a    ON a.id  = t.actor_id           AND a.owner_id  = t.owner_id
@@ -287,11 +301,9 @@ async fn fetch_transactions(
           AND t.occurred_on  < make_date($2, $3, 1) + INTERVAL '1 month'
         ORDER BY t.occurred_on, t.group_id, t.id
         "#,
-        owner_id,
-        year,
-        month,
-    )
-    .fetch_all(pool)
+        [owner_id.into(), year.into(), month.into()],
+    ))
+    .all(db)
     .await?;
 
     Ok(rows
@@ -318,26 +330,32 @@ struct ExportSettlement {
     settlement: Decimal,
 }
 
+#[derive(FromQueryResult)]
+struct ExportSettlementRow {
+    recognized_expense: Decimal,
+    deducted_amount: Decimal,
+    settlement_input: Decimal,
+}
+
 async fn fetch_settlement(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     owner_id: Uuid,
     year: i32,
     month: i32,
 ) -> Result<ExportSettlement, AppError> {
-    let row = sqlx::query!(
+    let row = ExportSettlementRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            recognized_expense AS "recognized_expense!: Decimal",
-            deducted_amount    AS "deducted_amount!: Decimal",
-            settlement_input   AS "settlement_input!: Decimal"
+            recognized_expense,
+            deducted_amount,
+            settlement_input
         FROM v_monthly_settlement
         WHERE owner_id = $1 AND month = make_date($2, $3, 1)
         "#,
-        owner_id,
-        year,
-        month,
-    )
-    .fetch_optional(pool)
+        [owner_id.into(), year.into(), month.into()],
+    ))
+    .one(db)
     .await?;
 
     Ok(match row {
@@ -359,18 +377,26 @@ struct ExportPivot {
     rows: Vec<(String, BTreeMap<String, Decimal>)>,
 }
 
+#[derive(FromQueryResult)]
+struct ExportSummaryRow {
+    category: String,
+    actor: String,
+    net_text: Option<String>,
+}
+
 async fn fetch_summary(
-    pool: &PgPool,
+    db: &DatabaseConnection,
     owner_id: Uuid,
     year: i32,
     month: i32,
 ) -> Result<ExportPivot, AppError> {
-    let rows = sqlx::query!(
+    let rows = ExportSummaryRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
-            c.name AS "category!: String",
-            COALESCE(a.name, '(미지정)') AS "actor!: String",
-            (-SUM(t.amount))::text AS "net_text?: String"
+            c.name AS category,
+            COALESCE(a.name, '(미지정)') AS actor,
+            (-SUM(t.amount))::text AS net_text
         FROM transactions t
         JOIN categories c         ON c.id = t.category_id AND c.owner_id = t.owner_id
         LEFT JOIN ledger_actors a ON a.id = t.actor_id    AND a.owner_id = t.owner_id
@@ -381,11 +407,9 @@ async fn fetch_summary(
         GROUP BY c.name, a.name
         ORDER BY c.name, a.name
         "#,
-        owner_id,
-        year,
-        month,
-    )
-    .fetch_all(pool)
+        [owner_id.into(), year.into(), month.into()],
+    ))
+    .all(db)
     .await?;
 
     let mut actors_seen: BTreeSet<String> = BTreeSet::new();
