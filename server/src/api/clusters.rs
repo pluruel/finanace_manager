@@ -1,10 +1,9 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
     Json,
 };
 use sea_orm::{
-    ConnectionTrait, DatabaseBackend, DatabaseConnection, FromQueryResult, Statement,
+    DatabaseBackend, DatabaseConnection, FromQueryResult, Statement,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -273,7 +272,7 @@ pub async fn handle_post_merge(
     State(_db): State<Arc<DatabaseConnection>>,
     ExtractUser(_user): ExtractUser,
     Json(_body): Json<MergeRequest>,
-) -> Result<Json<MergeResponse>, (StatusCode, String)> {
+) -> AppResult<Json<MergeResponse>> {
     // Implemented in Task 3
-    Err((StatusCode::NOT_IMPLEMENTED, "implemented in Task 3".into()))
+    Err(AppError::NotImplemented)
 }
