@@ -141,7 +141,7 @@ CREATE INDEX IF NOT EXISTS idx_merchants_name_trgm
 }
 ```
 
-내부적으로 `clusters` 와 같은 함수를 threshold=0.5 고정으로 호출, 카운트만 환산.
+내부적으로 `clusters` 와 같은 함수를 threshold=0.5 고정으로 호출, 카운트만 환산. `cluster_count` = 묶인 클러스터 수, `affected_rows` = 모든 클러스터의 멤버 수 합계 (병합 시 사라질 row 수가 아니라 "관련된 entity row 총수").
 
 ### 5.4 import 응답 확장
 
