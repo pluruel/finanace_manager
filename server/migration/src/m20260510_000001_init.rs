@@ -127,6 +127,10 @@ impl MigrationTrait for Migration {
         conn.execute_unprepared("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             .await?;
 
+        // pg_trgm for trigram similarity (used by /api/clusters)
+        conn.execute_unprepared("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            .await?;
+
         // ledger_actors
         m.create_table(
             Table::create()
@@ -545,6 +549,17 @@ impl MigrationTrait for Migration {
             conn.execute_unprepared(&format!("CREATE INDEX {name} ON transactions ({cols})"))
                 .await?;
         }
+
+        // GIN trgm indexes for /api/clusters similarity search
+        conn.execute_unprepared(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_products_name_trgm
+              ON products USING gin (name gin_trgm_ops);
+            CREATE INDEX IF NOT EXISTS idx_merchants_name_trgm
+              ON merchants USING gin (name gin_trgm_ops);
+            "#,
+        )
+        .await?;
 
         // v_monthly_settlement view — FILTER aggregates require raw SQL
         conn.execute_unprepared(
