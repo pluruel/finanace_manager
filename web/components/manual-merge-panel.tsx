@@ -12,10 +12,9 @@ type ListItem = ProductItem | MerchantItem;
 type Props = {
   scope: "product" | "merchant";
   onToast: (message: string, variant: "success" | "error") => void;
-  onMerged: () => void;
 };
 
-export function ManualMergePanel({ scope, onToast, onMerged }: Props) {
+export function ManualMergePanel({ scope, onToast }: Props) {
   const [items, setItems] = useState<ListItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -119,7 +118,6 @@ export function ManualMergePanel({ scope, onToast, onMerged }: Props) {
       onToast(`${selected.size}개 항목을 1개로 병합했습니다`, "success");
       setSelected(new Set());
       setCanonicalId(null);
-      onMerged();
       void fetchItems();
     } catch {
       onToast("서버와 통신할 수 없습니다.", "error");

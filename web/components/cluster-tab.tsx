@@ -120,11 +120,7 @@ export function ClusterTab() {
       {mode === "recommend" ? (
         <ClusterRecommendPanel scope={scope} onToast={show} />
       ) : (
-        <ManualMergePanel
-          scope={scope}
-          onToast={show}
-          onMerged={() => show("병합이 완료되었습니다.", "success")}
-        />
+        <ManualMergePanel scope={scope} onToast={show} />
       )}
 
       <Toaster toasts={toasts} />

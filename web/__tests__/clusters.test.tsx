@@ -168,7 +168,7 @@ const sampleProducts = [
 describe("ManualMergePanel", () => {
   it("mount 시 자동으로 product 리스트 fetch + 검색 필터링", async () => {
     mockFetchSequence([sampleProducts]);
-    render(<ManualMergePanel scope="product" onToast={() => {}} onMerged={() => {}} />);
+    render(<ManualMergePanel scope="product" onToast={() => {}} />);
     expect(await screen.findByText("고덕방 아이스아메리카노")).not.toBeNull();
     expect(screen.getByText("다른 제품")).not.toBeNull();
 
@@ -179,7 +179,7 @@ describe("ManualMergePanel", () => {
 
   it("선택 0~1개일 때 병합 버튼 disabled, 2개 + 대표 선택 시 활성화", async () => {
     mockFetchSequence([sampleProducts]);
-    render(<ManualMergePanel scope="product" onToast={() => {}} onMerged={() => {}} />);
+    render(<ManualMergePanel scope="product" onToast={() => {}} />);
     await screen.findByText("고덕방 아이스아메리카노");
     // 0개: 라디오 섹션 자체가 안 보임 (selected 0)
     expect(screen.queryByRole("button", { name: /병합/ })).toBeNull();
@@ -213,7 +213,7 @@ describe("ManualMergePanel", () => {
       return new Response(JSON.stringify(sampleProducts), { status: 200 });
     }) as unknown as typeof fetch;
 
-    render(<ManualMergePanel scope="product" onToast={() => {}} onMerged={() => {}} />);
+    render(<ManualMergePanel scope="product" onToast={() => {}} />);
     await screen.findByText("고덕방 아이스아메리카노");
     fireEvent.click(screen.getByLabelText("선택: 고덕방 아이스아메리카노"));
     fireEvent.click(screen.getByLabelText("선택: 고덕방 아메리카노"));
