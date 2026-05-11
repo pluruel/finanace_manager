@@ -60,6 +60,9 @@ pub fn router(db: Arc<DatabaseConnection>, jwks: Arc<JwksClient>) -> Router {
         )
         .route("/api/merchants", get(categories::handle_get_merchants))
         .route("/api/payment-methods", get(categories::handle_get_payment_methods))
+        // Bulk cluster merge (2026-05-11)
+        .route("/api/clusters", get(clusters::handle_get_clusters))
+        .route("/api/clusters/merge", post(clusters::handle_post_merge))
         .with_state(db.clone())
         .layer(middleware::from_fn_with_state(jwks, auth_middleware));
 
