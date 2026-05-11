@@ -91,6 +91,7 @@ describe("ClusterCard", () => {
 });
 
 import { ClusterTab } from "@/components/cluster-tab";
+import { ManualMergePanel } from "@/components/manual-merge-panel";
 
 function mockFetchSequence(responses: Array<unknown>) {
   let i = 0;
@@ -141,5 +142,88 @@ describe("ClusterTab", () => {
     // click manual refresh
     fireEvent.click(screen.getByRole("button", { name: /다시 계산/ }));
     await waitFor(() => expect(screen.queryByText("고덕방 아메리카노")).not.toBeNull());
+  });
+
+  it("ClusterTab: 추천/수동 모드 토글 가능, 수동 모드 진입 시 검색 인풋 노출", async () => {
+    mockFetchSequence([
+      // recommend 모드 자동 fetch (debounce 300ms 후 소비)
+      { scope: "product", threshold: 0.5, truncated: false, clusters: [] },
+      // 수동 모드 진입 시 products fetch
+      [],
+    ]);
+    render(<ClusterTab />);
+    // 추천 모드 자동 fetch 디바운스 완료 대기 후 탭 전환
+    await new Promise(r => setTimeout(r, 350));
+    fireEvent.click(screen.getByRole("tab", { name: "수동" }));
+    expect(await screen.findByPlaceholderText("이름으로 검색…")).not.toBeNull();
+  });
+});
+
+const sampleProducts = [
+  { id: "11111111-0000-0000-0000-000000000001", name: "고덕방 아이스아메리카노", merchant_id: null, merchant_name: null, review_state: "confirmed", transaction_count: 6 },
+  { id: "11111111-0000-0000-0000-000000000002", name: "고덕방 아메리카노",       merchant_id: null, merchant_name: null, review_state: "confirmed", transaction_count: 2 },
+  { id: "11111111-0000-0000-0000-000000000003", name: "다른 제품",               merchant_id: null, merchant_name: null, review_state: "confirmed", transaction_count: 1 },
+];
+
+describe("ManualMergePanel", () => {
+  it("mount 시 자동으로 product 리스트 fetch + 검색 필터링", async () => {
+    mockFetchSequence([sampleProducts]);
+    render(<ManualMergePanel scope="product" onToast={() => {}} onMerged={() => {}} />);
+    expect(await screen.findByText("고덕방 아이스아메리카노")).not.toBeNull();
+    expect(screen.getByText("다른 제품")).not.toBeNull();
+
+    fireEvent.change(screen.getByPlaceholderText("이름으로 검색…"), { target: { value: "고덕방" } });
+    expect(screen.queryByText("다른 제품")).toBeNull();
+    expect(screen.getByText("고덕방 아이스아메리카노")).not.toBeNull();
+  });
+
+  it("선택 0~1개일 때 병합 버튼 disabled, 2개 + 대표 선택 시 활성화", async () => {
+    mockFetchSequence([sampleProducts]);
+    render(<ManualMergePanel scope="product" onToast={() => {}} onMerged={() => {}} />);
+    await screen.findByText("고덕방 아이스아메리카노");
+    // 0개: 라디오 섹션 자체가 안 보임 (selected 0)
+    expect(screen.queryByRole("button", { name: /병합/ })).toBeNull();
+    // 1개 체크
+    fireEvent.click(screen.getByLabelText("선택: 고덕방 아이스아메리카노"));
+    // 1개 hint + 버튼 disabled
+    expect(screen.getByText("병합할 항목을 1개 더 선택하세요")).not.toBeNull();
+    // 2개 체크
+    fireEvent.click(screen.getByLabelText("선택: 고덕방 아메리카노"));
+    // 대표 미선택 → hint
+    expect(screen.getByText("대표 항목을 1개 선택하세요")).not.toBeNull();
+    // 대표 선택
+    fireEvent.click(screen.getByLabelText("대표: 고덕방 아이스아메리카노"));
+    const btn = screen.getByRole("button", { name: /병합/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("병합 클릭 → POST /api/clusters-proxy/merge 정확한 body 호출", async () => {
+    let postedBody: unknown = null;
+    let i = 0;
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (i === 0 && url.includes("/products-proxy")) {
+        i++;
+        return new Response(JSON.stringify(sampleProducts), { status: 200 });
+      }
+      if (url.includes("/clusters-proxy/merge")) {
+        postedBody = JSON.parse(init?.body as string);
+        return new Response(JSON.stringify({ merged_count: 1, txn_relinked: 2, aliases_deleted: 0 }), { status: 200 });
+      }
+      return new Response(JSON.stringify(sampleProducts), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    render(<ManualMergePanel scope="product" onToast={() => {}} onMerged={() => {}} />);
+    await screen.findByText("고덕방 아이스아메리카노");
+    fireEvent.click(screen.getByLabelText("선택: 고덕방 아이스아메리카노"));
+    fireEvent.click(screen.getByLabelText("선택: 고덕방 아메리카노"));
+    fireEvent.click(screen.getByLabelText("대표: 고덕방 아이스아메리카노"));
+    fireEvent.click(screen.getByRole("button", { name: /병합/ }));
+    await new Promise(r => setTimeout(r, 50));
+    expect(postedBody).toEqual({
+      scope: "product",
+      canonical_id: "11111111-0000-0000-0000-000000000001",
+      absorb_ids: ["11111111-0000-0000-0000-000000000002"],
+    });
   });
 });

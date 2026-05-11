@@ -1,11 +1,51 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
-import { Button } from "@/components/ui/button";
+import { useState, useCallback } from "react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { ClusterCard } from "@/components/cluster-card";
-import { ClustersResponseSchema, type Cluster } from "@/lib/schemas";
+import { ClusterRecommendPanel } from "@/components/cluster-recommend-panel";
+import { ManualMergePanel } from "@/components/manual-merge-panel";
+
+// ── 모드 토글 버튼 그룹 (추천 / 수동) ──────────────────────────────────────
+// Radix Tabs는 jsdom 환경에서 onValueChange가 fireEvent.click으로 트리거되지 않아
+// 테스트 신뢰성을 위해 plain button 그룹으로 구현한다.
+function ModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: "recommend" | "manual";
+  onChange: (m: "recommend" | "manual") => void;
+}) {
+  const base =
+    "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+  const active = "bg-background text-foreground shadow-sm";
+  const inactive = "text-muted-foreground";
+  return (
+    <div
+      role="tablist"
+      aria-label="병합 모드"
+      className="inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground"
+    >
+      <button
+        role="tab"
+        aria-selected={mode === "recommend"}
+        className={`${base} ${mode === "recommend" ? active : inactive}`}
+        onClick={() => onChange("recommend")}
+        type="button"
+      >
+        추천
+      </button>
+      <button
+        role="tab"
+        aria-selected={mode === "manual"}
+        className={`${base} ${mode === "manual" ? active : inactive}`}
+        onClick={() => onChange("manual")}
+        type="button"
+      >
+        수동
+      </button>
+    </div>
+  );
+}
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 
@@ -57,73 +97,16 @@ function Toaster({ toasts }: { toasts: ToastMessage[] }) {
 // ── ClusterTab ─────────────────────────────────────────────────────────────────
 
 export function ClusterTab() {
+  const [mode, setMode] = useState<"recommend" | "manual">("recommend");
   const [scope, setScope] = useState<"product" | "merchant">("product");
-  const [threshold, setThreshold] = useState<number>(0.5);
-  const [clusters, setClusters] = useState<Cluster[] | null>(null);
-  const [truncated, setTruncated] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-  const [isFetching, setIsFetching] = useState(false);
   const { toasts, show } = useToast();
-
-  const recompute = useCallback(async () => {
-    setError(null);
-    setIsFetching(true);
-    try {
-      const res = await fetch(
-        `/api/clusters-proxy?scope=${encodeURIComponent(scope)}&threshold=${encodeURIComponent(threshold)}`,
-        { cache: "no-store" }
-      );
-      const json: unknown = await res.json();
-      const parsed = ClustersResponseSchema.safeParse(json);
-      if (!parsed.success) {
-        setError("응답 형식이 올바르지 않습니다.");
-        return;
-      }
-      setClusters(parsed.data.clusters);
-      setTruncated(parsed.data.truncated);
-    } catch {
-      setError("서버와 통신할 수 없습니다.");
-    } finally {
-      setIsFetching(false);
-    }
-  }, [scope, threshold]);
-
-  // A2: scope/threshold 변경 시 자동 디바운스 재계산 (mount 포함)
-  useEffect(() => {
-    setClusters(null);
-    setTruncated(false);
-    const t = setTimeout(() => { void recompute(); }, 300);
-    return () => clearTimeout(t);
-  }, [scope, threshold, recompute]);
-
-  async function merge(canonicalId: string, absorbIds: string[]): Promise<void> {
-    setError(null);
-    try {
-      const res = await fetch("/api/clusters-proxy/merge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scope,
-          canonical_id: canonicalId,
-          absorb_ids: absorbIds,
-        }),
-      });
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        const detail = (json as { detail?: string }).detail;
-        show(detail ?? "병합에 실패했습니다.", "error");
-        return;
-      }
-    } catch {
-      show("서버와 통신할 수 없습니다.", "error");
-      return;
-    }
-    show(`${absorbIds.length}개 항목을 1개로 병합했습니다`, "success");
-    void recompute();
-  }
 
   return (
     <div className="space-y-4">
+      {/* 추천 / 수동 모드 토글 */}
+      <ModeToggle mode={mode} onChange={setMode} />
+
+      {/* 상품 / 가맹점 스코프 (두 모드 공유) */}
       <Tabs
         value={scope}
         onValueChange={(v) => setScope(v as "product" | "merchant")}
@@ -134,51 +117,15 @@ export function ClusterTab() {
         </TabsList>
       </Tabs>
 
-      <div className="flex items-center gap-3">
-        <label className="text-sm text-muted-foreground">
-          유사도 임계치: {threshold.toFixed(2)}
-        </label>
-        <input
-          type="range"
-          min={0.3}
-          max={0.9}
-          step={0.05}
-          value={threshold}
-          onChange={(e) => setThreshold(parseFloat(e.target.value))}
-          className="w-40"
+      {mode === "recommend" ? (
+        <ClusterRecommendPanel scope={scope} onToast={show} />
+      ) : (
+        <ManualMergePanel
+          scope={scope}
+          onToast={show}
+          onMerged={() => show("병합이 완료되었습니다.", "success")}
         />
-      </div>
-
-      <Button onClick={() => void recompute()} disabled={isFetching}>
-        다시 계산
-      </Button>
-
-      {error && (
-        <Alert variant="destructive">
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
       )}
-
-      {truncated && (
-        <Alert>
-          <AlertDescription>
-            결과가 너무 많아 일부만 표시됩니다. 임계치를 높이면 더 정확한 결과를 얻을 수 있습니다.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {clusters !== null && clusters.length === 0 && (
-        <p className="text-sm text-muted-foreground">묶을 후보가 없습니다</p>
-      )}
-
-      {clusters !== null &&
-        clusters.map((c) => (
-          <ClusterCard
-            key={c.members.map(m => m.id).slice().sort().join("|")}
-            cluster={c}
-            onMerge={merge}
-          />
-        ))}
 
       <Toaster toasts={toasts} />
     </div>
