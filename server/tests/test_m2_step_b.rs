@@ -15,11 +15,12 @@ use axum::{
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::normalize::to_norm_key;
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -37,7 +38,7 @@ fn load_golden_bytes() -> Vec<u8> {
     std::fs::read(path).expect("Failed to read golden xlsx fixture")
 }
 
-async fn do_import(pool: &PgPool, owner_id: Uuid) {
+async fn do_import(t: &common::TestDb, owner_id: Uuid) {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
@@ -50,35 +51,43 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
     let raw_rows = parse_xlsx(&bytes, &sheet_name).unwrap();
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await.unwrap();
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"#,
-        owner_id, filename, hash_vec, year, month, row_count,
-    )
-    .fetch_one(&mut *tx)
+    let txn = t.db.begin().await.unwrap();
+    let batch_id = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
     .await
-    .unwrap();
+    .unwrap()
+    .last_insert_id;
 
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+    run_pipeline(&txn, owner_id, batch_id, raw_rows)
         .await
         .unwrap();
-    tx.commit().await.unwrap();
+    txn.commit().await.unwrap();
 }
 
 /// Insert a throwaway import_batch row and return its id.
-async fn insert_batch(pool: &PgPool, owner_id: Uuid, suffix: &str) -> Uuid {
+async fn insert_batch(db: &sea_orm::DatabaseConnection, owner_id: Uuid, suffix: &str) -> Uuid {
     let hash = format!("fake-hash-{}-{}", owner_id, suffix).into_bytes();
-    sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 1, 1) RETURNING id"#,
-        owner_id,
-        format!("test_{}.xlsx", suffix),
-        hash,
-    )
-    .fetch_one(pool)
+    ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(format!("test_{}.xlsx", suffix)),
+        file_hash: Set(hash),
+        year: Set(2026),
+        month: Set(1),
+        row_count: Set(1),
+        ..Default::default()
+    })
+    .exec(db)
     .await
     .unwrap()
+    .last_insert_id
 }
 
 /// Build a test router that wires the aliases + settlement + categories endpoints
@@ -177,7 +186,7 @@ async fn merge_merchant_remaps_transactions() {
     .await
     .unwrap();
 
-    let batch_id = insert_batch(&pool, owner_id, "t1").await;
+    let batch_id = insert_batch(&*db, owner_id, "t1").await;
 
     // Seed 3 transactions referencing the source merchant.
     for i in 0..3_i32 {
@@ -330,7 +339,7 @@ async fn merge_product_remaps_product_id() {
     .await
     .unwrap();
 
-    let batch_id = insert_batch(&pool, owner_id, "p2").await;
+    let batch_id = insert_batch(&*db, owner_id, "p2").await;
 
     // 2 transactions referencing the source product.
     for i in 0..2_i32 {
@@ -421,7 +430,7 @@ async fn confirm_rejects_deduction_category() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Find the 차감 category id.
     let chagang_id: Uuid = sqlx::query_scalar!(
@@ -823,7 +832,7 @@ async fn settlement_unchanged_after_merge() {
     let pool = Arc::new(t.pool.clone());
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Pick two merchants to merge (any two — just not source=target).
     let merchants: Vec<(Uuid, String)> = sqlx::query!(
@@ -939,7 +948,7 @@ async fn delete_alias_removes_only_alias_row() {
     let pool = Arc::new(t.pool.clone());
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Pick any alias.
     let alias: (Uuid, Uuid) = sqlx::query!(
@@ -1003,7 +1012,7 @@ async fn review_queue_returns_pending_items() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()
@@ -1034,7 +1043,7 @@ async fn confirm_merchant_flips_review_state() {
     let pool = Arc::new(t.pool.clone());
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Find a pending merchant.
     let merchant_id: Uuid = sqlx::query_scalar!(
@@ -1081,7 +1090,7 @@ async fn confirm_payment_method_flips_review_state() {
     let pool = Arc::new(t.pool.clone());
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(&pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let pm_id: Uuid = sqlx::query_scalar!(
         r#"SELECT id FROM payment_methods WHERE owner_id = $1 AND review_state = 'pending' LIMIT 1"#,
@@ -1140,7 +1149,7 @@ async fn review_queue_payment_method_returns_pending() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let app = build_test_router(Arc::clone(&db), owner_id);
     let req = Request::builder()

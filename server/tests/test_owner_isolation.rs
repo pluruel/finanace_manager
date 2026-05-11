@@ -13,9 +13,10 @@ use axum::{
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use finance_manager::import::pipeline::run_pipeline;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -55,7 +56,7 @@ fn build_transactions_router_for_user(db: Arc<DatabaseConnection>, owner_id: Uui
         ))
 }
 
-async fn import_for_owner(pool: &PgPool, owner_id: Uuid, bytes: &[u8]) {
+async fn import_for_owner(t: &common::TestDb, owner_id: Uuid, bytes: &[u8]) {
     let filename = "2026년 02월.xlsx";
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -66,28 +67,27 @@ async fn import_for_owner(pool: &PgPool, owner_id: Uuid, bytes: &[u8]) {
     let raw_rows = parse_xlsx(bytes, &sheet_name).unwrap();
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await.unwrap();
+    let txn = t.db.begin().await.unwrap();
 
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id"#,
-        owner_id,
-        filename,
-        hash_vec,
-        year,
-        month,
-        row_count,
-    )
-    .fetch_one(&mut *tx)
+    let batch_id = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
     .await
-    .unwrap();
+    .unwrap()
+    .last_insert_id;
 
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+    run_pipeline(&txn, owner_id, batch_id, raw_rows)
         .await
         .unwrap();
 
-    tx.commit().await.unwrap();
+    txn.commit().await.unwrap();
 }
 
 #[tokio::test]
@@ -101,8 +101,8 @@ async fn transactions_owner_isolation() {
     let bytes = load_golden_bytes();
 
     // 두 owner 모두 같은 데이터 임포트 (file_hash가 다른 owner_id별로 분리됨)
-    import_for_owner(pool, owner_a, &bytes).await;
-    import_for_owner(pool, owner_b, &bytes).await;
+    import_for_owner(&t, owner_a, &bytes).await;
+    import_for_owner(&t, owner_b, &bytes).await;
 
     // owner_a 토큰으로 조회
     let app_a = build_transactions_router_for_user(Arc::clone(&db), owner_a);

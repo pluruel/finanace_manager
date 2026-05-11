@@ -13,10 +13,11 @@ use axum::{
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait, sea_query::OnConflict};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -33,7 +34,7 @@ fn load_golden_bytes() -> Vec<u8> {
     std::fs::read(path).expect("Failed to read golden xlsx fixture")
 }
 
-async fn do_import(pool: &PgPool, owner_id: Uuid) {
+async fn do_import(t: &common::TestDb, owner_id: Uuid) {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
@@ -46,28 +47,27 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
     let raw_rows = parse_xlsx(&bytes, &sheet_name).unwrap();
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await.unwrap();
+    let txn = t.db.begin().await.unwrap();
 
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id"#,
-        owner_id,
-        filename,
-        hash_vec,
-        year,
-        month,
-        row_count,
-    )
-    .fetch_one(&mut *tx)
+    let r = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
     .await
     .unwrap();
+    let batch_id = r.last_insert_id;
 
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+    run_pipeline(&txn, owner_id, batch_id, raw_rows)
         .await
         .unwrap();
 
-    tx.commit().await.unwrap();
+    txn.commit().await.unwrap();
 }
 
 /// Build a test router for a given owner that includes the summary and settlement routes.
@@ -139,19 +139,21 @@ async fn atomic_upsert_same_id_on_second_call() {
 
     // First import.
     let hash1 = insert_batch("a");
-    let mut tx1 = pool.begin().await.unwrap();
-    let batch1: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash1,
-        row_count,
-    )
-    .fetch_one(&mut *tx1)
+    let tx1 = t.db.begin().await.unwrap();
+    let batch1 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash1),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&tx1)
     .await
-    .unwrap();
-    run_pipeline(&mut *tx1, owner_id, batch1, raw_rows.clone())
+    .unwrap()
+    .last_insert_id;
+    run_pipeline(&tx1, owner_id, batch1, raw_rows.clone())
         .await
         .unwrap();
     tx1.commit().await.unwrap();
@@ -170,19 +172,21 @@ async fn atomic_upsert_same_id_on_second_call() {
 
     // Second import — same owner, different file hash.
     let hash2 = insert_batch("b");
-    let mut tx2 = pool.begin().await.unwrap();
-    let batch2: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash2,
-        row_count,
-    )
-    .fetch_one(&mut *tx2)
+    let tx2 = t.db.begin().await.unwrap();
+    let batch2 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash2),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&tx2)
     .await
-    .unwrap();
-    run_pipeline(&mut *tx2, owner_id, batch2, raw_rows)
+    .unwrap()
+    .last_insert_id;
+    run_pipeline(&tx2, owner_id, batch2, raw_rows)
         .await
         .unwrap();
     tx2.commit().await.unwrap();
@@ -218,21 +222,23 @@ async fn atomic_upsert_same_id_on_second_call() {
 
     // Third import (another suffix) — merchant ids must match.
     let hash3 = insert_batch("c");
-    let mut tx3 = pool.begin().await.unwrap();
+    let tx3 = t.db.begin().await.unwrap();
     let row_count_i32 = raw_rows_clone_count(&bytes, filename);
-    let batch3: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash3,
-        row_count_i32,
-    )
-    .fetch_one(&mut *tx3)
+    let batch3 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash3),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count_i32),
+        ..Default::default()
+    })
+    .exec(&tx3)
     .await
-    .unwrap();
+    .unwrap()
+    .last_insert_id;
     let raw_rows3 = parse_xlsx(&bytes, &extract_sheet_name(filename).unwrap()).unwrap();
-    run_pipeline(&mut *tx3, owner_id, batch3, raw_rows3)
+    run_pipeline(&tx3, owner_id, batch3, raw_rows3)
         .await
         .unwrap();
     tx3.commit().await.unwrap();
@@ -266,7 +272,7 @@ async fn chagang_category_has_confirmed_review_state() {
     let t = common::TestDb::new().await;
     let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let row = sqlx::query!(
         r#"SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'"#,
@@ -289,7 +295,7 @@ async fn chagang_review_state_not_downgraded_on_reimport() {
     let t = common::TestDb::new().await;
     let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     // Manually set review_state to 'confirmed' (already should be).
     // Then run a second pipeline to confirm it stays 'confirmed'.
@@ -304,19 +310,21 @@ async fn chagang_review_state_not_downgraded_on_reimport() {
     h.update(b"reimport");
     let hash2 = h.finalize().to_vec();
 
-    let mut tx = pool.begin().await.unwrap();
-    let batch2: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, 2026, 2, $4) RETURNING id"#,
-        owner_id,
-        filename,
-        hash2,
-        row_count,
-    )
-    .fetch_one(&mut *tx)
+    let tx = t.db.begin().await.unwrap();
+    let batch2 = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash2),
+        year: Set(2026),
+        month: Set(2),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&tx)
     .await
-    .unwrap();
-    run_pipeline(&mut *tx, owner_id, batch2, raw_rows)
+    .unwrap()
+    .last_insert_id;
+    run_pipeline(&tx, owner_id, batch2, raw_rows)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -344,7 +352,7 @@ async fn summary_2026_02_spot_check() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let app = build_test_router(db, owner_id);
     let req = Request::builder()
@@ -404,7 +412,7 @@ async fn settlement_2026_02_deducted_amount() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let app = build_test_router(db, owner_id);
     let req = Request::builder()
@@ -489,7 +497,7 @@ async fn categories_list_returns_data() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let app = build_test_router(db, owner_id);
     let req = Request::builder()
@@ -521,7 +529,7 @@ async fn merchants_list_returns_data() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let app = build_test_router(db, owner_id);
     let req = Request::builder()
@@ -545,7 +553,7 @@ async fn payment_methods_list_returns_data() {
     let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let app = build_test_router(db, owner_id);
     let req = Request::builder()

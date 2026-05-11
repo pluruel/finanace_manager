@@ -7,8 +7,10 @@
 
 mod common;
 
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
+use sea_orm::{ActiveValue::Set, EntityTrait, TransactionTrait};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -20,7 +22,7 @@ fn load_golden_bytes() -> Vec<u8> {
     std::fs::read(path).expect("Failed to read golden xlsx fixture")
 }
 
-async fn run_golden_import(pool: &PgPool, owner_id: Uuid) -> anyhow::Result<()> {
+async fn run_golden_import(t: &common::TestDb, owner_id: Uuid) -> anyhow::Result<()> {
     use sha2::{Digest, Sha256};
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -33,18 +35,22 @@ async fn run_golden_import(pool: &PgPool, owner_id: Uuid) -> anyhow::Result<()> 
     let raw_rows = parse_xlsx(&bytes, &sheet_name)?;
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await?;
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING id"#,
-        owner_id, filename, hash_vec, year, month, row_count,
-    )
-    .fetch_one(&mut *tx)
-    .await?;
+    let txn = t.db.begin().await?;
+    let batch_id = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
+    .await?
+    .last_insert_id;
 
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows).await?;
-    tx.commit().await?;
+    run_pipeline(&txn, owner_id, batch_id, raw_rows).await?;
+    txn.commit().await?;
     Ok(())
 }
 
@@ -63,7 +69,7 @@ async fn import_classifies_income_categories_by_name() {
     let t = common::TestDb::new().await;
     let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    run_golden_import(pool, owner_id).await.unwrap();
+    run_golden_import(&t, owner_id).await.unwrap();
 
     // 키워드 매치 → income
     assert_eq!(kind_of(pool, owner_id, "급여").await.as_deref(), Some("income"));
@@ -76,7 +82,7 @@ async fn import_keeps_other_categories_as_expense() {
     let t = common::TestDb::new().await;
     let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    run_golden_import(pool, owner_id).await.unwrap();
+    run_golden_import(&t, owner_id).await.unwrap();
 
     // 키워드 미매치 → expense
     assert_eq!(kind_of(pool, owner_id, "차감").await.as_deref(), Some("expense"));
@@ -91,7 +97,7 @@ async fn import_splits_insurance_rows_by_sign() {
     let t = common::TestDb::new().await;
     let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    run_golden_import(pool, owner_id).await.unwrap();
+    run_golden_import(&t, owner_id).await.unwrap();
 
     assert_eq!(kind_of(pool, owner_id, "보험").await.as_deref(), Some("expense"));
     assert_eq!(kind_of(pool, owner_id, "보험금").await.as_deref(), Some("income"));

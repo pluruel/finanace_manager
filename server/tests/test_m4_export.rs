@@ -13,9 +13,10 @@ use axum::{
 };
 use calamine::{open_workbook_from_rs, DataType, Reader, Xlsx};
 use finance_manager::auth::AuthUser;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
-use sea_orm::DatabaseConnection;
+use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::io::Cursor;
@@ -31,7 +32,7 @@ fn load_golden_bytes() -> Vec<u8> {
     std::fs::read(path).expect("Failed to read golden xlsx fixture")
 }
 
-async fn do_import(pool: &PgPool, owner_id: Uuid) {
+async fn do_import(t: &common::TestDb, owner_id: Uuid) {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
@@ -44,20 +45,25 @@ async fn do_import(pool: &PgPool, owner_id: Uuid) {
     let raw_rows = parse_xlsx(&bytes, &sheet_name).unwrap();
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await.unwrap();
-    let batch_id: Uuid = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"#,
-        owner_id, filename, hash_vec, year, month, row_count,
-    )
-    .fetch_one(&mut *tx)
+    let txn = t.db.begin().await.unwrap();
+    let batch_id = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .exec(&txn)
     .await
-    .unwrap();
+    .unwrap()
+    .last_insert_id;
 
-    run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+    run_pipeline(&txn, owner_id, batch_id, raw_rows)
         .await
         .unwrap();
-    tx.commit().await.unwrap();
+    txn.commit().await.unwrap();
 }
 
 fn build_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
@@ -89,7 +95,7 @@ async fn export_returns_valid_xlsx_with_three_sheets() {
     let t = common::TestDb::new().await;
     let pool = &t.pool;
     let owner_id = Uuid::new_v4();
-    do_import(pool, owner_id).await;
+    do_import(&t, owner_id).await;
 
     let db = Arc::clone(&t.db);
     let app = build_router(Arc::clone(&db), owner_id);

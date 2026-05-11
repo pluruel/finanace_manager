@@ -11,7 +11,9 @@ mod common;
 
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use finance_manager::import::pipeline::run_pipeline;
+use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use rust_decimal::Decimal;
+use sea_orm::{ActiveValue::Set, DbErr, EntityTrait, TransactionTrait, sea_query::OnConflict};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -26,7 +28,7 @@ fn load_golden_bytes() -> Vec<u8> {
 /// 임포트 파이프라인을 직접 실행해 결과를 반환한다.
 /// 실제 HTTP 레이어를 건너뛰고 pipeline + DB만 검증.
 async fn run_import(
-    pool: &PgPool,
+    t: &common::TestDb,
     owner_id: Uuid,
     bytes: &[u8],
     filename: &str,
@@ -42,32 +44,38 @@ async fn run_import(
     let raw_rows = parse_xlsx(bytes, &sheet_name)?;
     let row_count = raw_rows.len() as i32;
 
-    let mut tx = pool.begin().await?;
+    let txn = t.db.begin().await?;
 
-    let batch_id: Option<Uuid> = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (owner_id, file_hash) DO NOTHING
-           RETURNING id"#,
-        owner_id,
-        filename,
-        hash_vec,
-        year,
-        month,
-        row_count,
+    let result = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(filename.to_string()),
+        file_hash: Set(hash_vec),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            import_batches::Column::OwnerId,
+            import_batches::Column::FileHash,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .fetch_optional(&mut *tx)
-    .await?;
+    .exec(&txn)
+    .await;
 
-    let batch_id = match batch_id {
-        Some(id) => id,
-        None => anyhow::bail!("CONFLICT: already imported"),
+    let batch_id = match result {
+        Ok(r) => r.last_insert_id,
+        Err(DbErr::RecordNotInserted) => anyhow::bail!("CONFLICT: already imported"),
+        Err(e) => return Err(e.into()),
     };
 
     let (transactions_inserted, integrity_warnings, _) =
-        run_pipeline(&mut *tx, owner_id, batch_id, raw_rows).await?;
+        run_pipeline(&txn, owner_id, batch_id, raw_rows).await?;
 
-    tx.commit().await?;
+    txn.commit().await?;
 
     Ok((batch_id, transactions_inserted, integrity_warnings))
 }
@@ -80,7 +88,7 @@ async fn import_golden_transactions_count() {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    let (_, tx_count, warnings) = run_import(pool, owner_id, &bytes, filename)
+    let (_, tx_count, warnings) = run_import(&t, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -109,7 +117,7 @@ async fn import_golden_product_null_count() {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    run_import(pool, owner_id, &bytes, filename)
+    run_import(&t, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -141,7 +149,7 @@ async fn import_golden_integrity_sql_zero_violations() {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    let (batch_id, _, _) = run_import(pool, owner_id, &bytes, filename)
+    let (batch_id, _, _) = run_import(&t, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -189,7 +197,7 @@ async fn import_golden_settlement_deducted_amount() {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    run_import(pool, owner_id, &bytes, filename)
+    run_import(&t, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
@@ -238,14 +246,14 @@ async fn import_duplicate_returns_conflict() {
     let filename = "2026년 02월.xlsx";
 
     // 1차 임포트 성공
-    let (_, tx_count_1, _) = run_import(pool, owner_id, &bytes, filename)
+    let (_, tx_count_1, _) = run_import(&t, owner_id, &bytes, filename)
         .await
         .expect("first import failed");
 
     assert_eq!(tx_count_1, 177);
 
     // 2차 임포트 → CONFLICT 에러
-    let result = run_import(pool, owner_id, &bytes, filename).await;
+    let result = run_import(&t, owner_id, &bytes, filename).await;
     assert!(
         result.is_err(),
         "두 번째 임포트는 에러를 반환해야 한다"
@@ -282,7 +290,7 @@ async fn import_single_batch_verified() {
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
 
-    run_import(pool, owner_id, &bytes, filename)
+    run_import(&t, owner_id, &bytes, filename)
         .await
         .expect("import failed");
 
