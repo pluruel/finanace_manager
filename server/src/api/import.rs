@@ -5,13 +5,17 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use sea_orm::{DatabaseConnection, DbErr, EntityTrait, TransactionTrait};
+use sea_orm::ActiveValue::Set;
+use sea_orm::sea_query::OnConflict;
 use sha2::{Digest, Sha256};
-use sea_orm::DatabaseConnection;
+use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::ExtractUser;
 use crate::domain::ImportResult;
+use crate::entity::{import_batches, prelude::ImportBatches};
 use crate::error::{AppError, AppResult};
 use crate::import::{
     pipeline::run_pipeline,
@@ -43,7 +47,6 @@ pub async fn handle_import(
     ExtractUser(user): ExtractUser,
     mut multipart: Multipart,
 ) -> AppResult<impl IntoResponse> {
-    let pool = crate::db::pool_of(&db);
     // multipart에서 파일 추출
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_name: String = "unknown.xlsx".to_string();
@@ -101,49 +104,55 @@ pub async fn handle_import(
         .map_err(|e| AppError::BadRequest(format!("Failed to parse xlsx: {}", e)))?;
 
     let row_count = raw_rows.len() as i32;
-    let owner_id = user.sub;
+    let owner_id: Uuid = user.sub;
 
     // 단일 트랜잭션 시작
     // import_batches INSERT → raw 저장 → alias 매핑 → transactions 생성 → 무결성 검증 모두 같은 tx.
     // 어느 단계에서든 실패하면 tx drop 시 자동 rollback → file_hash 미점유 → 사용자 재시도 가능.
-    let mut tx = pool.begin().await?;
+    let txn = db.begin().await?;
 
     // import_batches 멱등 삽입 (트랜잭션 내)
-    // RETURNING이 None이면 이미 존재 → rollback 후 409
-    let batch_id: Option<Uuid> = sqlx::query_scalar!(
-        r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (owner_id, file_hash) DO NOTHING
-           RETURNING id"#,
-        owner_id,
-        file_name,
-        hash_vec,
-        year,
-        month,
-        row_count,
+    // RecordNotInserted이면 이미 존재 → rollback 후 409
+    let result = ImportBatches::insert(import_batches::ActiveModel {
+        owner_id: Set(owner_id),
+        file_name: Set(file_name.clone()),
+        file_hash: Set(hash_vec.clone()),
+        year: Set(year),
+        month: Set(month),
+        row_count: Set(row_count),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            import_batches::Column::OwnerId,
+            import_batches::Column::FileHash,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
-    .fetch_optional(&mut *tx)
-    .await?;
+    .exec(&txn)
+    .await;
 
-    let batch_id: Uuid = match batch_id {
-        Some(id) => id,
-        None => {
+    let batch_id: Uuid = match result {
+        Ok(r) => r.last_insert_id,
+        Err(DbErr::RecordNotInserted) => {
             // tx 드롭 → 자동 rollback (실제로 아무것도 삽입된 게 없음)
-            return Err(AppError::Conflict(serde_json::json!({
+            return Err(AppError::Conflict(json!({
                 "error": "duplicate_import",
                 "message": "This file has already been imported (same SHA-256 hash).",
             })));
         }
+        Err(e) => return Err(e.into()),
     };
 
     // 파이프라인 실행 (같은 트랜잭션)
     let (transactions_inserted, integrity_warnings, unresolved_aliases) =
-        run_pipeline(&mut *tx, owner_id, batch_id, raw_rows)
+        run_pipeline(&txn, owner_id, batch_id, raw_rows)
             .await
             .map_err(|e| AppError::Internal(e))?;
 
     // 모든 단계 성공 → 커밋
-    tx.commit().await?;
+    txn.commit().await?;
 
     let result = ImportResult {
         batch_id,
