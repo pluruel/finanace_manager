@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { vi } from "vitest";
 import {
@@ -75,5 +75,48 @@ describe("ClusterCard", () => {
     render(<ClusterCard cluster={sampleCluster} onMerge={onMerge} />);
     fireEvent.click(screen.getByRole("button", { name: /병합/ }));
     expect(onMerge).toHaveBeenCalledWith("a", expect.arrayContaining(["b", "c"]));
+  });
+});
+
+import { ClusterTab } from "@/components/cluster-tab";
+
+function mockFetchSequence(responses: Array<unknown>) {
+  let i = 0;
+  global.fetch = vi.fn(async () => {
+    const body = responses[i++] ?? { clusters: [], scope: "product", threshold: 0.5, truncated: false };
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("ClusterTab", () => {
+  it("초기에는 안내 텍스트만 보이고 fetch 안 함", () => {
+    mockFetchSequence([]);
+    render(<ClusterTab />);
+    expect(screen.queryByText(/다시 계산/)).not.toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("'다시 계산' 클릭 시 fetch 후 카드 렌더", async () => {
+    mockFetchSequence([{
+      scope: "product", threshold: 0.5, truncated: false,
+      clusters: [{
+        members: [
+          { id: "aaaaaaaa-0000-0000-0000-000000000001", name: "고덕방 아메리카노", txn_count: 3, latest_seen: "2026-02-28" },
+          { id: "bbbbbbbb-0000-0000-0000-000000000002", name: "고덕방 아아",       txn_count: 1, latest_seen: "2026-02-15" },
+        ],
+        suggested_canonical_id: "aaaaaaaa-0000-0000-0000-000000000001",
+        avg_similarity: 0.5,
+      }],
+    }]);
+    render(<ClusterTab />);
+    fireEvent.click(screen.getByRole("button", { name: /다시 계산/ }));
+    expect(await screen.findByText("고덕방 아메리카노")).not.toBeNull();
   });
 });
