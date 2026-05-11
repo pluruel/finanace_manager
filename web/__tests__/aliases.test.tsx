@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AliasesTabContent } from "../components/aliases-tab-content";
 import type { ReviewQueueItem } from "../lib/schemas";
@@ -611,5 +611,77 @@ describe("Tab switching state isolation", () => {
 
     // Product tab unchanged
     expect(productTab.textContent).toContain("All product entries are confirmed");
+  });
+});
+
+// ── Test 6: MergeDialog — 직접 검색 ──────────────────────────────────────────
+
+describe("MergeDialog — 직접 검색", () => {
+  const itemNoCandidates = {
+    scope: "category" as const,
+    id: "cat-1",
+    name: "식비",
+    review_state: "pending",
+    kind: "expense",
+    raw_texts: [{ alias_id: "a-1", raw_text: "식비", norm_key: "식비" }],
+    merge_candidates: [],
+  };
+
+  const categoryList = [
+    { id: "cat-2", name: "외식", kind: "expense", review_state: "confirmed", parent_id: null },
+    { id: "cat-3", name: "배달", kind: "expense", review_state: "confirmed", parent_id: null },
+  ];
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (typeof url === "string" && url.includes("categories-proxy")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(categoryList),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("추천 후보 없어도 Merge 버튼이 활성화됨", () => {
+    render(<AliasesTabContent scope="category" initialItems={[itemNoCandidates]} />);
+    const mergeBtn = screen.getByTitle("Merge into an existing entity");
+    expect((mergeBtn as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("dialog 열리면 검색 input이 표시됨", async () => {
+    render(<AliasesTabContent scope="category" initialItems={[itemNoCandidates]} />);
+    fireEvent.click(screen.getByTitle("Merge into an existing entity"));
+    expect(screen.getByTestId("merge-search-input")).toBeTruthy();
+  });
+
+  it("2자 이상 입력 시 검색 결과 표시", async () => {
+    render(<AliasesTabContent scope="category" initialItems={[itemNoCandidates]} />);
+    fireEvent.click(screen.getByTitle("Merge into an existing entity"));
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith(
+      "/api/categories-proxy",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    fireEvent.change(screen.getByTestId("merge-search-input"), { target: { value: "외식" } });
+    expect(await screen.findByText("외식")).toBeTruthy();
+  });
+
+  it("검색 결과 클릭 후 Merge 버튼 활성화", async () => {
+    render(<AliasesTabContent scope="category" initialItems={[itemNoCandidates]} />);
+    fireEvent.click(screen.getByTitle("Merge into an existing entity"));
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
+    fireEvent.change(screen.getByTestId("merge-search-input"), { target: { value: "외식" } });
+    fireEvent.click(await screen.findByText("외식"));
+    // The submit Merge button in the DialogFooter
+    const submitBtn = screen.getAllByRole("button").find(
+      (b) => b.textContent?.trim() === "Merge" || b.textContent?.includes("Merge"),
+    ) as HTMLButtonElement | undefined;
+    expect(submitBtn).toBeTruthy();
+    expect(submitBtn!.disabled).toBe(false);
   });
 });
