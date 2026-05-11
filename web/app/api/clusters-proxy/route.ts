@@ -22,13 +22,12 @@ export async function GET(request: NextRequest) {
   }
 
   const url = new URL(request.url);
-  const scope = url.searchParams.get("scope") ?? "product";
-  const threshold = url.searchParams.get("threshold") ?? "0.5";
+  const qs = url.search; // "?scope=...&threshold=..." — forward verbatim; missing params → backend 400
 
   let upstream: Response;
   try {
     upstream = await fetch(
-      `${API_BASE}/api/clusters?scope=${encodeURIComponent(scope)}&threshold=${encodeURIComponent(threshold)}`,
+      `${API_BASE}/api/clusters${qs}`,
       {
         method: "GET",
         headers: {
