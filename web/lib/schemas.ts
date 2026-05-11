@@ -329,3 +329,15 @@ export const MergeResponseSchema = z.object({
   aliases_deleted: z.number().int(),
 });
 export type MergeResponse = z.infer<typeof MergeResponseSchema>;
+
+export const CategoryItemSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  kind: z.string(),
+  review_state: z.string(),
+  parent_id: z.string().uuid().nullable(),
+});
+
+export type CategoryItem = z.infer<typeof CategoryItemSchema>;
+
+export const CategoryListSchema = z.array(CategoryItemSchema);
