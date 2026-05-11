@@ -127,6 +127,15 @@ impl MigrationTrait for Migration {
         conn.execute_unprepared("CREATE EXTENSION IF NOT EXISTS pgcrypto")
             .await?;
 
+        // pg_trgm for trigram similarity (used by /api/clusters).
+        // Install in pg_catalog so its internal types (gtrgm, etc.) live there
+        // and are not picked up by sea-orm-migration's public-schema type sweep
+        // (sea-orm-migration ≤1.0.x does not filter extension-owned types).
+        conn.execute_unprepared(
+            "CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA pg_catalog",
+        )
+        .await?;
+
         // ledger_actors
         m.create_table(
             Table::create()
@@ -546,6 +555,17 @@ impl MigrationTrait for Migration {
                 .await?;
         }
 
+        // GIN trgm indexes for /api/clusters similarity search
+        conn.execute_unprepared(
+            r#"
+            CREATE INDEX products_name_trgm_idx
+              ON products USING gin (name gin_trgm_ops);
+            CREATE INDEX merchants_name_trgm_idx
+              ON merchants USING gin (name gin_trgm_ops);
+            "#,
+        )
+        .await?;
+
         // v_monthly_settlement view — FILTER aggregates require raw SQL
         conn.execute_unprepared(
             r#"
@@ -575,6 +595,8 @@ impl MigrationTrait for Migration {
     async fn down(&self, m: &SchemaManager) -> Result<(), DbErr> {
         let conn = m.get_connection();
         conn.execute_unprepared("DROP VIEW IF EXISTS v_monthly_settlement")
+            .await?;
+        conn.execute_unprepared("DROP EXTENSION IF EXISTS pg_trgm CASCADE")
             .await?;
         m.drop_table(Table::drop().table(Transactions::Table).to_owned())
             .await?;

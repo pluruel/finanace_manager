@@ -297,3 +297,35 @@ export const TransactionFilterSchema = z.object({
 });
 
 export type TransactionFilter = z.infer<typeof TransactionFilterSchema>;
+
+// ── Clusters (2026-05-11) ─────────────────────────────────────────────────────
+
+export const ClusterMemberSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  txn_count: z.number().int(),
+  latest_seen: z.string().nullable(),
+});
+export type ClusterMember = z.infer<typeof ClusterMemberSchema>;
+
+export const ClusterSchema = z.object({
+  members: z.array(ClusterMemberSchema),
+  suggested_canonical_id: z.string().uuid(),
+  avg_similarity: z.number(),
+});
+export type Cluster = z.infer<typeof ClusterSchema>;
+
+export const ClustersResponseSchema = z.object({
+  scope: z.enum(["product", "merchant"]),
+  threshold: z.number(),
+  clusters: z.array(ClusterSchema),
+  truncated: z.boolean(),
+});
+export type ClustersResponse = z.infer<typeof ClustersResponseSchema>;
+
+export const MergeResponseSchema = z.object({
+  merged_count: z.number().int(),
+  txn_relinked: z.number().int(),
+  aliases_deleted: z.number().int(),
+});
+export type MergeResponse = z.infer<typeof MergeResponseSchema>;

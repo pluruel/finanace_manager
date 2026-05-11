@@ -5,21 +5,24 @@ import { ReviewQueueResponseSchema, ReviewQueueItem } from "@/lib/schemas";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AliasesTabContent } from "@/components/aliases-tab-content";
+import { ClusterTab } from "@/components/cluster-tab";
 
-// The 4 scopes exposed in the UI. Actor is intentionally omitted — only 3 fixed
+// The 5 scopes exposed in the UI. Actor is intentionally omitted — only 3 fixed
 // values and no review_state column.
 const TABS = [
   { value: "category", label: "Category" },
   { value: "merchant", label: "Merchant" },
   { value: "payment_method", label: "Payment" },
   { value: "product", label: "Product" },
+  { value: "cluster", label: "클러스터" },
 ] as const;
 
 type TabScope = (typeof TABS)[number]["value"];
+type ReviewScope = Exclude<TabScope, "cluster">;
 
 // ── Per-tab server fetch ───────────────────────────────────────────────────────
 
-async function fetchReviewQueue(scope: TabScope): Promise<ReviewQueueItem[]> {
+async function fetchReviewQueue(scope: ReviewScope): Promise<ReviewQueueItem[]> {
   const data = await apiFetch(`/api/review-queue?scope=${scope}`, {
     schema: ReviewQueueResponseSchema,
   });
@@ -28,7 +31,7 @@ async function fetchReviewQueue(scope: TabScope): Promise<ReviewQueueItem[]> {
 
 // ── Tab panel (server component — fetches its own data) ───────────────────────
 
-async function TabPanel({ scope }: { scope: TabScope }) {
+async function TabPanel({ scope }: { scope: ReviewScope }) {
   let items: ReviewQueueItem[];
 
   try {
@@ -49,7 +52,7 @@ async function TabPanel({ scope }: { scope: TabScope }) {
     );
   }
 
-  return <AliasesTabContent scope={scope} initialItems={items} />;
+  return <AliasesTabContent scope={scope as ReviewScope} initialItems={items} />;
 }
 
 // ── Page ───────────────────────────────────────────────────────────────────────
@@ -78,16 +81,20 @@ export default function AliasesPage() {
 
         {TABS.map((tab) => (
           <TabsContent key={tab.value} value={tab.value} className="mt-4">
-            <Suspense
-              fallback={
-                <div className="flex items-center gap-2 py-8 text-muted-foreground text-sm">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Loading {tab.label.toLowerCase()} queue...
-                </div>
-              }
-            >
-              <TabPanel scope={tab.value} />
-            </Suspense>
+            {tab.value === "cluster" ? (
+              <ClusterTab />
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="flex items-center gap-2 py-8 text-muted-foreground text-sm">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Loading {tab.label.toLowerCase()} queue...
+                  </div>
+                }
+              >
+                <TabPanel scope={tab.value as ReviewScope} />
+              </Suspense>
+            )}
           </TabsContent>
         ))}
       </Tabs>

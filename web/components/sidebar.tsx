@@ -40,13 +40,11 @@ const navItems: NavItem[] = [
     href: "/aliases",
     label: "정규화",
     icon: Tag,
-    disabled: true,
   },
   {
     href: "/price-history",
     label: "가격 추적",
     icon: TrendingUp,
-    disabled: true,
   },
 ];
 
