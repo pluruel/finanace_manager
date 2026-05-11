@@ -1,5 +1,6 @@
 pub mod aliases;
 pub mod categories;
+pub mod clusters;
 pub mod export;
 pub mod import;
 pub mod income;
