@@ -8,22 +8,23 @@
 
 같은 제품/가맹점이 표기 차이("고덕방 아메리카노" / "고덕방 아아" / "고덕방 아이스아메리카노")로 인해 `products` / `merchants` 테이블에 별개 row 로 흩어져 있음. 현재 `/aliases` 페이지의 review queue 는 신규 raw 1건 단위 검토만 지원하고, **이미 만들어진 canonical entity 들 자체를 묶는 도구는 없음**.
 
-목표: 사용자가 "사실은 같은 것"인 entity 후보 묶음을 한 화면에서 보고, 대표 하나만 남기고 나머지를 흡수하는 일괄 병합 도구를 제공한다. 또한 import 직후 추천 후보를 알림으로 띄워 작업 동선을 짧게 한다.
+목표: 사용자가 "사실은 같은 것"인 entity 후보 묶음을 한 화면에서 보고, 대표 하나만 남기고 나머지를 흡수하는 일괄 병합 도구를 제공한다. 진입은 `/aliases` 페이지의 새 탭 단일 통로.
 
 비목표:
-- 자동 병합 없음 (어디까지나 추천 + 사용자 확정).
+- 자동 병합 없음 (사용자가 직접 확정).
+- import-time 추천 / 토스트 / 배지 없음. 사용자가 여러 달 import 누적 후 필요할 때 탭에 들어가서 일괄 정리하는 흐름.
 - categories / payment_methods 는 이번 스코프 외.
 - 의미 임베딩(아아↔아메리카노) 미지원. trigram 한도 내에서 동작.
 
 ## 2. 사용자 시나리오
 
-1. 사용자가 월간 엑셀을 import 한다.
-2. import 완료 토스트에 "정규화 추천 5건 (제품 4 / 가맹점 1) → [확인]" 링크가 뜬다.
-3. 링크를 누르면 `/aliases?tab=cluster&scope=product` 로 이동한다.
-4. 클러스터 탭에 후보 카드 4장이 보인다. 각 카드에는 비슷한 product 멤버 N개, 트랜잭션 수 가장 많은 row 가 기본 대표(라디오)로 선택됨, 나머지는 흡수 체크박스 기본 ON.
+1. 사용자가 월간 엑셀을 여러 달 import 누적한다.
+2. 정리할 시점이 되면 `/aliases` → "클러스터" 탭 진입.
+3. 서브탭에서 Products 또는 Merchants 선택, 임계치 슬라이더 조정 후 "다시 계산" 클릭.
+4. 후보 카드들이 렌더된다. 각 카드에는 비슷한 멤버 N개, 트랜잭션 수 가장 많은 row 가 기본 대표(라디오)로 선택됨, 나머지는 흡수 체크박스 기본 ON.
 5. 사용자가 대표 라디오 / 흡수 체크박스를 조정하고 "병합" 클릭.
 6. 카드가 사라지고 클러스터 목록이 갱신된다. 토스트로 "N건 병합 완료" 안내.
-7. 직접 진입(import 와 무관)도 가능: `/aliases` → 클러스터 탭 → 임계치 슬라이더 조정해서 다시 계산.
+7. 모든 카드를 처리했거나 만족스러우면 탭을 떠남.
 
 ## 3. 아키텍처
 
@@ -32,15 +33,14 @@
 - **Backend**: `server/src/api/clusters.rs` (신규)
   - `GET  /api/clusters?scope=product|merchant&threshold=0.5`
   - `POST /api/clusters/merge`
-  - `GET  /api/clusters/hints` — scope 별 클러스터 카운트만 가볍게
-- **Backend**: `server/src/api/import.rs` 응답에 `cluster_hints` 필드 추가
 - **DB**: `pg_trgm` extension + products/merchants `name` 컬럼 GIN trgm 인덱스
 - **Frontend**:
-  - `web/app/(app)/aliases/page.tsx` — 5번째 "클러스터" 탭 + 라벨 배지
+  - `web/app/(app)/aliases/page.tsx` — 5번째 "클러스터" 탭 추가
   - `web/components/cluster-tab.tsx` — Products/Merchants 서브토글, 임계치 슬라이더, 다시계산 버튼
   - `web/components/cluster-card.tsx` — 멤버 리스트, 라디오/체크박스, 병합 버튼
   - `web/lib/cluster-data.ts` — 정렬/표시 헬퍼
-  - import 완료 토스트(기존 import UI)에 추천 링크 추가
+
+import 응답이나 외부 알림과는 연결되지 않는다.
 
 ### 3.2 alias 모델 짧은 복습
 
@@ -131,41 +131,11 @@ CREATE INDEX IF NOT EXISTS idx_merchants_name_trgm
 { "merged_count": 2, "txn_relinked": 8, "aliases_deleted": 1 }
 ```
 
-### 5.3 `GET /api/clusters/hints`
-
-응답:
-```json
-{
-  "product":  { "cluster_count": 4, "affected_rows": 12 },
-  "merchant": { "cluster_count": 1, "affected_rows": 3 }
-}
-```
-
-내부적으로 `clusters` 와 같은 함수를 threshold=0.5 고정으로 호출, 카운트만 환산. `cluster_count` = 묶인 클러스터 수, `affected_rows` = 모든 클러스터의 멤버 수 합계 (병합 시 사라질 row 수가 아니라 "관련된 entity row 총수").
-
-### 5.4 import 응답 확장
-
-`POST /api/import/upload` 응답에 `cluster_hints` 필드 추가. 계산 실패 시 import 자체는 성공으로 응답하고 `cluster_hints` 는 null.
-
-```json
-{
-  "imported": 177,
-  "cluster_hints": {
-    "product":  { "cluster_count": 4, "affected_rows": 12 },
-    "merchant": { "cluster_count": 1, "affected_rows": 3 }
-  }
-}
-```
-
 ## 6. Frontend
 
 ### 6.1 진입점
 
-| 위치 | 동작 |
-|---|---|
-| `/aliases` 의 "클러스터" 탭 | 병합 실제 실행 — 유일한 실행 화면 |
-| 페이지 mount 시 `GET /clusters/hints` | 탭 라벨 옆 빨간 배지(숫자). 사용자가 탭 진입하면 해당 세션 동안 dot 사라짐 |
-| import 완료 토스트 | "N건 import 완료. 정규화 추천 X건 → [확인]" 링크 → `/aliases?tab=cluster&scope=product` |
+`/aliases` 페이지의 "클러스터" 탭 단일 통로. 외부 알림 / 배지 / 토스트 추천 없음. 사용자가 정리하고 싶을 때 탭에 들어와서 직접 "다시 계산" 버튼을 누르는 흐름.
 
 ### 6.2 클러스터 탭 UI
 
@@ -204,7 +174,6 @@ CREATE INDEX IF NOT EXISTS idx_merchants_name_trgm
 | 같은 raw 가 다음 import 때 또 들어옴 | 학습 효과 없음 → 신규 product/merchant 재생성 → 다음 클러스터 라운드에서 다시 묶음. 사용자 합의된 트레이드오프 |
 | pg_trgm extension 미설치 | init 마이그레이션이 `CREATE EXTENSION IF NOT EXISTS` 보장 |
 | 결과 200 클러스터 초과 | 응답 truncate + `truncated: true` 플래그 |
-| import 직후 cluster_hints 계산 실패 | import 응답은 성공, `cluster_hints: null`. 토스트는 추천 텍스트 생략 |
 
 ## 8. 테스트 계획
 
@@ -217,9 +186,8 @@ CREATE INDEX IF NOT EXISTS idx_merchants_name_trgm
 5. `merge_relinks_transactions_and_deletes_absorbed`
 6. `merge_deletes_aliases_pointing_to_absorbed`
 7. `merge_rejects_canonical_in_absorb_ids` (400)
-8. `merge_works_for_merchant_scope`
-9. `import_response_includes_cluster_hints` — 골든 엑셀 import 시 product cluster_count ≥ 1
-10. `clusters_hints_endpoint_returns_counts`
+8. `merge_rejects_empty_absorb_ids` (400)
+9. `merge_works_for_merchant_scope`
 
 ### 8.2 Frontend (`web/__tests__/clusters.test.tsx` 신규)
 
@@ -228,23 +196,19 @@ CREATE INDEX IF NOT EXISTS idx_merchants_name_trgm
 3. 임계치 슬라이더 변경 후 "다시 계산" 클릭 → refetch
 4. 흡수 체크박스 0개 → 병합 버튼 disabled
 5. 병합 버튼 클릭 → POST + 카드 사라짐
-6. 라벨 배지 표시 (hints 응답 기반)
-7. `lib/cluster-data.ts` 헬퍼 단위 테스트
+6. `lib/cluster-data.ts` 헬퍼 단위 테스트
 
 ### 8.3 인수 기준
 
 - 골든 엑셀 (`2026년 02월.xlsx`) 재import 후, scope=product / threshold=0.5 에서 의미상 동일한 product 묶음이 최소 1개 이상 후보로 등장.
 - 한 클러스터를 병합하면 transactions 전부 canonical 가리킴, 흡수 row 와 그 alias 는 삭제됨.
-- import 응답 `cluster_hints.product.cluster_count` 가 위 클러스터 수와 일치.
 
 ## 9. 구현 순서 제안
 
 1. DB: init.rs 에 pg_trgm + GIN 인덱스 in-place 추가, fresh + reimport 로 검증
-2. Backend: cluster 계산 함수(공유), `GET /clusters`, `POST /clusters/merge`, `GET /clusters/hints` 순으로
-3. Backend: import 응답에 cluster_hints 필드 추가
-4. Frontend: cluster-tab + cluster-card + lib helper, /aliases 탭 통합
-5. Frontend: import 토스트에 추천 링크
-6. 백엔드 테스트 → 프론트 테스트 → 골든 데이터 인수 확인
+2. Backend: cluster 계산 함수, `GET /clusters`, `POST /clusters/merge`
+3. Frontend: cluster-tab + cluster-card + lib helper, /aliases 탭 통합
+4. 백엔드 테스트 → 프론트 테스트 → 골든 데이터 인수 확인
 
 ## 10. 미정/추후 과제
 
