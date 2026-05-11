@@ -19,10 +19,12 @@ use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
-use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait};
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -111,25 +113,21 @@ async fn fetch_json(app: Router, uri: &str) -> (StatusCode, Value) {
     (status, json)
 }
 
-async fn lookup_id(pool: &PgPool, owner_id: Uuid, table: &str, name: &str) -> Uuid {
-    // Static SQL per table to satisfy sqlx::query_scalar!.
-    match table {
-        "products" => sqlx::query_scalar!(
-            r#"SELECT id AS "id!: Uuid" FROM products WHERE owner_id = $1 AND name = $2"#,
-            owner_id, name,
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or_else(|e| panic!("product '{name}' not found: {e}")),
-        "merchants" => sqlx::query_scalar!(
-            r#"SELECT id AS "id!: Uuid" FROM merchants WHERE owner_id = $1 AND name = $2"#,
-            owner_id, name,
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or_else(|e| panic!("merchant '{name}' not found: {e}")),
-        _ => panic!("unsupported table: {table}"),
-    }
+#[derive(FromQueryResult)]
+struct IdRow { id: Uuid }
+
+async fn lookup_id(db: &sea_orm::DatabaseConnection, owner_id: Uuid, table: &str, name: &str) -> Uuid {
+    let sql = format!("SELECT id FROM {table} WHERE owner_id = $1 AND name = $2");
+    IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        &sql,
+        [owner_id.into(), name.into()],
+    ))
+    .one(db)
+    .await
+    .unwrap_or_else(|e| panic!("lookup failed for {table} '{name}': {e}"))
+    .unwrap_or_else(|| panic!("{table} '{name}' not found"))
+    .id
 }
 
 // ── Test: GET /api/products ───────────────────────────────────────────────────
@@ -137,7 +135,6 @@ async fn lookup_id(pool: &PgPool, owner_id: Uuid, table: &str, name: &str) -> Uu
 #[tokio::test]
 async fn products_list_after_import() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
 
@@ -167,10 +164,9 @@ async fn products_list_after_import() {
 #[tokio::test]
 async fn products_filter_by_merchant_and_q() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
-    let merchant_id = lookup_id(pool, owner_id, "merchants", "고덕방").await;
+    let merchant_id = lookup_id(&*t.db, owner_id, "merchants", "고덕방").await;
 
     let db = Arc::clone(&t.db);
     let app = build_test_router(Arc::clone(&db), owner_id);
@@ -209,10 +205,9 @@ async fn products_filter_by_merchant_and_q() {
 #[tokio::test]
 async fn price_history_americano_six_at_3400() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
-    let product_id = lookup_id(pool, owner_id, "products", "아이스아메리카노").await;
+    let product_id = lookup_id(&*t.db, owner_id, "products", "아이스아메리카노").await;
 
     let db = Arc::clone(&t.db);
     let app = build_test_router(db, owner_id);
@@ -273,10 +268,9 @@ async fn price_history_unknown_product_returns_404() {
 #[tokio::test]
 async fn merchant_stats_godeokbang_feb() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
-    let merchant_id = lookup_id(pool, owner_id, "merchants", "고덕방").await;
+    let merchant_id = lookup_id(&*t.db, owner_id, "merchants", "고덕방").await;
 
     let db = Arc::clone(&t.db);
     let app = build_test_router(db, owner_id);
@@ -302,21 +296,27 @@ async fn merchant_stats_godeokbang_feb() {
 
 /// PLAN §6 M3 acceptance: the 167 memo-less Feb rows are surfaced via the
 /// memo_less_only filter. Sum across all merchants must equal 167.
+#[derive(FromQueryResult)]
+struct CountRow { c: i64 }
+
 #[tokio::test]
 async fn merchant_stats_memo_less_only_total_matches_golden() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
 
     // Fetch every merchant id, sum memo_less_count across all of them.
-    let merchant_ids: Vec<Uuid> = sqlx::query_scalar!(
-        r#"SELECT id AS "id!: Uuid" FROM merchants WHERE owner_id = $1"#,
-        owner_id
-    )
-    .fetch_all(pool)
+    let merchant_ids: Vec<Uuid> = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id FROM merchants WHERE owner_id = $1"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .into_iter()
+    .map(|r| r.id)
+    .collect();
 
     let db = Arc::clone(&t.db);
     let mut total_memo_less: i64 = 0;
@@ -337,17 +337,20 @@ async fn merchant_stats_memo_less_only_total_matches_golden() {
     // Endpoint also filters by categories.kind='expense' (income rows like 급여/회수
     // are excluded from merchant stats), so the anchor must mirror that filter or
     // drift the moment the heuristic flags any merchant-attributed row as income.
-    let direct: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "n!: i64"
+    let direct: i64 = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c
            FROM transactions t
            JOIN categories c ON c.id = t.category_id AND c.owner_id = t.owner_id
            WHERE t.owner_id = $1 AND t.product_id IS NULL AND t.merchant_id IS NOT NULL
              AND c.kind = 'expense'"#,
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .c;
 
     assert_eq!(
         total_memo_less, direct,

@@ -11,7 +11,7 @@ use axum::{
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
-use sea_orm::DatabaseConnection;
+use sea_orm::{DatabaseBackend, DatabaseConnection, FromQueryResult, Statement};
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -42,90 +42,92 @@ fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
         ))
 }
 
+// ── Helper ────────────────────────────────────────────────────────────────────
+
+#[derive(FromQueryResult)]
+struct IdRow { id: Uuid }
+
+async fn insert_returning_id(
+    db: &sea_orm::DatabaseConnection,
+    sql: &str,
+    values: Vec<sea_orm::Value>,
+) -> Uuid {
+    IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        sql,
+        values,
+    ))
+    .one(db)
+    .await
+    .unwrap()
+    .unwrap()
+    .id
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Happy path: one income transaction for 엉아; 공동 and 아기 should be zero-filled.
 #[tokio::test]
 async fn income_by_actor_one_actor_has_income() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let db = Arc::clone(&t.db);
 
     // Create three ledger actors
-    let _actor_gongjong = sqlx::query_scalar!(
+    let _actor_gongjong = insert_returning_id(
+        &*t.db,
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '공동') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let actor_eonga: Uuid = sqlx::query_scalar!(
+    let actor_eonga = insert_returning_id(
+        &*t.db,
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let _actor_baby: Uuid = sqlx::query_scalar!(
+    let _actor_baby = insert_returning_id(
+        &*t.db,
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '아기') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
     // Create an income category
-    let category_id: Uuid = sqlx::query_scalar!(
+    let category_id = insert_returning_id(
+        &*t.db,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
     // Insert minimal import_batch + transactions_raw to satisfy the FK chain
-    let batch_id: Uuid = sqlx::query_scalar!(
+    let batch_id = insert_returning_id(
+        &*t.db,
         r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
            VALUES ($1, 'test.xlsx', '\x00'::bytea, 2026, 2, 1)
            RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
     let group_id = Uuid::new_v4();
 
-    let raw_id: Uuid = sqlx::query_scalar!(
+    let raw_id = insert_returning_id(
+        &*t.db,
         r#"INSERT INTO transactions_raw
            (owner_id, import_batch_id, row_index, group_id, is_group_header)
            VALUES ($1, $2, 0, $3, true)
            RETURNING id"#,
-        owner_id,
-        batch_id,
-        group_id,
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into(), batch_id.into(), group_id.into()],
+    ).await;
 
     // Insert one income transaction for 엉아 (amount positive = cash inflow)
-    sqlx::query!(
+    use sea_orm::ConnectionTrait;
+    t.db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO transactions
            (owner_id, raw_id, group_id, occurred_on, actor_id, category_id, amount)
            VALUES ($1, $2, $3, '2026-02-25', $4, $5, 3500000)"#,
-        owner_id,
-        raw_id,
-        group_id,
-        actor_eonga,
-        category_id,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into(), raw_id.into(), group_id.into(), actor_eonga.into(), category_id.into()],
+    )).await.unwrap();
 
     // Build router and call the endpoint
     let app = build_test_router(db, owner_id);
@@ -191,56 +193,47 @@ async fn income_by_actor_one_actor_has_income() {
 #[tokio::test]
 async fn income_response_includes_categories_breakdown() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let db = Arc::clone(&t.db);
 
-    let actor_eonga: Uuid = sqlx::query_scalar!(
+    use sea_orm::ConnectionTrait;
+
+    let actor_eonga = insert_returning_id(
+        &*t.db,
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let salary_cat: Uuid = sqlx::query_scalar!(
+    let salary_cat = insert_returning_id(
+        &*t.db,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let batch_id: Uuid = sqlx::query_scalar!(
+    let batch_id = insert_returning_id(
+        &*t.db,
         r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
            VALUES ($1, 'cat.xlsx', '\x02'::bytea, 2026, 2, 1)
            RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
     let group_id = Uuid::new_v4();
-    let raw_id: Uuid = sqlx::query_scalar!(
+    let raw_id = insert_returning_id(
+        &*t.db,
         r#"INSERT INTO transactions_raw
            (owner_id, import_batch_id, row_index, group_id, is_group_header)
            VALUES ($1, $2, 0, $3, true) RETURNING id"#,
-        owner_id, batch_id, group_id,
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into(), batch_id.into(), group_id.into()],
+    ).await;
 
-    sqlx::query!(
+    t.db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO transactions
            (owner_id, raw_id, group_id, occurred_on, actor_id, category_id, amount)
            VALUES ($1, $2, $3, '2026-02-25', $4, $5, 4500000)"#,
-        owner_id, raw_id, group_id, actor_eonga, salary_cat,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into(), raw_id.into(), group_id.into(), actor_eonga.into(), salary_cat.into()],
+    )).await.unwrap();
 
     let app = build_test_router(db, owner_id);
     let response = app
@@ -274,65 +267,57 @@ async fn income_response_includes_categories_breakdown() {
 #[tokio::test]
 async fn income_categories_exclude_expense_kind() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let db = Arc::clone(&t.db);
 
-    let actor: Uuid = sqlx::query_scalar!(
+    use sea_orm::ConnectionTrait;
+
+    let actor = insert_returning_id(
+        &*t.db,
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let income_cat: Uuid = sqlx::query_scalar!(
+    let income_cat = insert_returning_id(
+        &*t.db,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '급여', 'income') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let expense_cat: Uuid = sqlx::query_scalar!(
+    let expense_cat = insert_returning_id(
+        &*t.db,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let batch_id: Uuid = sqlx::query_scalar!(
+    let batch_id = insert_returning_id(
+        &*t.db,
         r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
            VALUES ($1, 'mix.xlsx', '\x03'::bytea, 2026, 2, 2)
            RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
     for (i, (cat, amount)) in [(income_cat, 1000000_i64), (expense_cat, -50000_i64)].iter().enumerate() {
         let group_id = Uuid::new_v4();
-        let raw_id: Uuid = sqlx::query_scalar!(
+        let raw_id = insert_returning_id(
+            &*t.db,
             r#"INSERT INTO transactions_raw
                (owner_id, import_batch_id, row_index, group_id, is_group_header)
                VALUES ($1, $2, $3, $4, true) RETURNING id"#,
-            owner_id, batch_id, i as i32, group_id,
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
+            vec![owner_id.into(), batch_id.into(), (i as i64).into(), group_id.into()],
+        ).await;
 
-        sqlx::query!(
+        t.db.execute(Statement::from_sql_and_values(
+            DatabaseBackend::Postgres,
             r#"INSERT INTO transactions
                (owner_id, raw_id, group_id, occurred_on, actor_id, category_id, amount)
                VALUES ($1, $2, $3, '2026-02-15', $4, $5, $6)"#,
-            owner_id, raw_id, group_id, actor, cat, rust_decimal::Decimal::from(*amount),
-        )
-        .execute(pool)
-        .await
-        .unwrap();
+            vec![
+                owner_id.into(), raw_id.into(), group_id.into(), actor.into(), (*cat).into(),
+                rust_decimal::Decimal::from(*amount).into(),
+            ],
+        )).await.unwrap();
     }
 
     let app = build_test_router(db, owner_id);
@@ -363,64 +348,50 @@ async fn income_categories_exclude_expense_kind() {
 #[tokio::test]
 async fn expense_transactions_excluded_from_income() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let db = Arc::clone(&t.db);
 
-    let _actor: Uuid = sqlx::query_scalar!(
+    use sea_orm::ConnectionTrait;
+
+    let _actor = insert_returning_id(
+        &*t.db,
         "INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '엉아') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let expense_cat: Uuid = sqlx::query_scalar!(
+    let expense_cat = insert_returning_id(
+        &*t.db,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
-    let batch_id: Uuid = sqlx::query_scalar!(
+    let batch_id = insert_returning_id(
+        &*t.db,
         r#"INSERT INTO import_batches (owner_id, file_name, file_hash, year, month, row_count)
            VALUES ($1, 'test2.xlsx', '\x01'::bytea, 2026, 2, 1)
            RETURNING id"#,
-        owner_id
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into()],
+    ).await;
 
     let group_id = Uuid::new_v4();
 
-    let raw_id: Uuid = sqlx::query_scalar!(
+    let raw_id = insert_returning_id(
+        &*t.db,
         r#"INSERT INTO transactions_raw
            (owner_id, import_batch_id, row_index, group_id, is_group_header)
            VALUES ($1, $2, 0, $3, true)
            RETURNING id"#,
-        owner_id,
-        batch_id,
-        group_id,
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into(), batch_id.into(), group_id.into()],
+    ).await;
 
     // Insert an expense transaction (negative amount = cash outflow)
-    sqlx::query!(
+    t.db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"INSERT INTO transactions
            (owner_id, raw_id, group_id, occurred_on, category_id, amount)
            VALUES ($1, $2, $3, '2026-02-10', $4, -15000)"#,
-        owner_id,
-        raw_id,
-        group_id,
-        expense_cat,
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        vec![owner_id.into(), raw_id.into(), group_id.into(), expense_cat.into()],
+    )).await.unwrap();
 
     let app = build_test_router(db, owner_id);
 

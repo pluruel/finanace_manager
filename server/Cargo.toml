@@ -23,10 +23,6 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 tower = { version = "0.4" }
 
 # Database
-# TRANSITIONAL: sqlx direct dep — removed in T8 once all modules are ported to sea-orm.
-sqlx = { version = "0.7", features = [
-    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "rust_decimal", "json"
-] }
 sea-orm = { version = "1", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlx-postgres",
@@ -88,5 +84,4 @@ axum-test-helper = { version = "0.4", default-features = false }
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["full"] }
-sea-orm = { version = "1", default-features = false, features = ["mock"] }   # for unit-test mocks if needed later
 tokio = { version = "1", features = ["full", "test-util"] }

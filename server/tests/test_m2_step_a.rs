@@ -17,9 +17,11 @@ use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use rust_decimal::Decimal;
-use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait, sea_query::OnConflict};
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -117,10 +119,12 @@ fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
 /// batch ids) would fail at the import_batches level. Instead, we call
 /// run_pipeline twice with distinct batch ids to force double-normalization.
 /// The second run must return identical entity ids and must not error.
+#[derive(FromQueryResult)]
+struct IdNameRow { id: Uuid, name: String }
+
 #[tokio::test]
 async fn atomic_upsert_same_id_on_second_call() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -159,11 +163,12 @@ async fn atomic_upsert_same_id_on_second_call() {
     tx1.commit().await.unwrap();
 
     // Collect category ids from first run.
-    let cats_after_first: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM categories WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(pool)
+    let cats_after_first: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM categories WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -192,11 +197,12 @@ async fn atomic_upsert_same_id_on_second_call() {
     tx2.commit().await.unwrap();
 
     // Category ids must be identical — no new rows created on second run.
-    let cats_after_second: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM categories WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(pool)
+    let cats_after_second: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM categories WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -209,11 +215,12 @@ async fn atomic_upsert_same_id_on_second_call() {
     );
 
     // Same check for merchants.
-    let merch_first: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(pool)
+    let merch_first: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -243,11 +250,12 @@ async fn atomic_upsert_same_id_on_second_call() {
         .unwrap();
     tx3.commit().await.unwrap();
 
-    let merch_after: Vec<(Uuid, String)> = sqlx::query!(
-        r#"SELECT id AS "id!: Uuid", name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
-        owner_id
-    )
-    .fetch_all(pool)
+    let merch_after: Vec<(Uuid, String)> = IdNameRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT id, name FROM merchants WHERE owner_id = $1 ORDER BY name"#,
+        [owner_id.into()],
+    ))
+    .all(&*t.db)
     .await
     .unwrap()
     .into_iter()
@@ -267,19 +275,23 @@ fn raw_rows_clone_count(bytes: &[u8], filename: &str) -> i32 {
 
 // ── Test 2: "차감" review_state = 'confirmed' ─────────────────────────────────
 
+#[derive(FromQueryResult)]
+struct ReviewStateRow { review_state: String }
+
 #[tokio::test]
 async fn chagang_category_has_confirmed_review_state() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
 
-    let row = sqlx::query!(
+    let row = ReviewStateRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'"#,
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
+    .expect("query failed")
     .expect("차감 category not found");
 
     assert_eq!(
@@ -293,7 +305,6 @@ async fn chagang_category_has_confirmed_review_state() {
 #[tokio::test]
 async fn chagang_review_state_not_downgraded_on_reimport() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
 
@@ -329,12 +340,14 @@ async fn chagang_review_state_not_downgraded_on_reimport() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    let row = sqlx::query!(
+    let row = ReviewStateRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT review_state FROM categories WHERE owner_id = $1 AND name = '차감'"#,
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
+    .expect("query failed")
     .expect("차감 category not found after reimport");
 
     assert_eq!(
@@ -349,7 +362,6 @@ async fn chagang_review_state_not_downgraded_on_reimport() {
 #[tokio::test]
 async fn summary_2026_02_spot_check() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
@@ -409,7 +421,6 @@ async fn summary_2026_02_spot_check() {
 #[tokio::test]
 async fn settlement_2026_02_deducted_amount() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
@@ -494,7 +505,6 @@ async fn settlement_empty_month_returns_zeros() {
 #[tokio::test]
 async fn categories_list_returns_data() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
@@ -526,7 +536,6 @@ async fn categories_list_returns_data() {
 #[tokio::test]
 async fn merchants_list_returns_data() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
@@ -550,7 +559,6 @@ async fn merchants_list_returns_data() {
 #[tokio::test]
 async fn payment_methods_list_returns_data() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;

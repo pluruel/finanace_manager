@@ -3,7 +3,7 @@
 /// 두 owner_id로 같은 데이터 임포트 → 각자 토큰으로 조회 시 자기 데이터만 보임.
 /// 인증 미들웨어는 Extension<AuthUser>를 직접 주입하는 방식으로 우회.
 ///
-/// 테스트 5: error 매핑 (sqlx 23505 → Conflict 409)
+/// 테스트 5: error 매핑 (AppError::Conflict → 409)
 
 mod common;
 
@@ -16,9 +16,11 @@ use finance_manager::auth::AuthUser;
 use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
 use finance_manager::import::pipeline::run_pipeline;
-use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait};
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -90,10 +92,12 @@ async fn import_for_owner(t: &common::TestDb, owner_id: Uuid, bytes: &[u8]) {
     txn.commit().await.unwrap();
 }
 
+#[derive(FromQueryResult)]
+struct IdRow { id: Uuid }
+
 #[tokio::test]
 async fn transactions_owner_isolation() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let db = Arc::clone(&t.db);
     let owner_a = Uuid::new_v4();
     let owner_b = Uuid::new_v4();
@@ -146,13 +150,15 @@ async fn transactions_owner_isolation() {
     // 교차 검증: owner_a의 데이터에 owner_b의 ID가 없어야 한다
     let items_a = json_a["items"].as_array().unwrap();
     // DB에서 owner_b의 transactions를 직접 조회해 owner_a 응답에 없는지 확인
-    let owner_b_tx_id: Option<Uuid> = sqlx::query_scalar!(
+    let owner_b_tx_id: Option<Uuid> = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"SELECT id FROM transactions WHERE owner_id = $1 LIMIT 1"#,
-        owner_b
-    )
-    .fetch_optional(pool)
+        [owner_b.into()],
+    ))
+    .one(&*db)
     .await
-    .unwrap();
+    .unwrap()
+    .map(|r| r.id);
 
     if let Some(b_id) = owner_b_tx_id {
         let b_id_str = b_id.to_string();
@@ -200,15 +206,11 @@ async fn transactions_empty_for_new_owner() {
 
 // ─── 테스트 5: error 매핑 ────────────────────────────────────────────────────
 
-/// sqlx 23505 unique_violation → AppError::Conflict(409) 변환 확인
+/// AppError::Conflict → HTTP 409 변환 확인
 #[test]
-fn sqlx_unique_violation_maps_to_conflict() {
-    // sqlx::Error를 직접 생성해 AppError 변환 검증
-    // 실제 DB 불필요 — 오류 매핑 로직만 단위 테스트
-    use finance_manager::error::AppError;
-
-    // sqlx::Error::Database를 시뮬레이션하기 어려우므로
+fn conflict_error_maps_to_409() {
     // AppError::Conflict를 직접 생성해 IntoResponse가 409를 반환하는지 검증
+    use finance_manager::error::AppError;
     use axum::response::IntoResponse;
     use axum::http::StatusCode;
 

@@ -13,9 +13,3 @@ pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
     let db = Database::connect(opt).await?;
     Ok(db)
 }
-
-/// Temporary bridge for modules still using sqlx directly (T5–T7 will remove the callers,
-/// T8 will remove this function).
-pub fn pool_of(db: &DatabaseConnection) -> &sqlx::PgPool {
-    db.get_postgres_connection_pool()
-}

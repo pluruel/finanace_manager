@@ -16,9 +16,12 @@ use finance_manager::auth::AuthUser;
 use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, parse_xlsx};
-use sea_orm::{ActiveValue::Set, DatabaseConnection, EntityTrait, TransactionTrait};
+use rust_decimal::Decimal;
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, DatabaseConnection, EntityTrait, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use std::io::Cursor;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -90,10 +93,16 @@ fn build_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
         ))
 }
 
+#[derive(FromQueryResult)]
+struct SettlementRow {
+    r: Decimal,
+    d: Decimal,
+    s: Decimal,
+}
+
 #[tokio::test]
 async fn export_returns_valid_xlsx_with_three_sheets() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     do_import(&t, owner_id).await;
 
@@ -134,17 +143,17 @@ async fn export_returns_valid_xlsx_with_three_sheets() {
 
     // Settlement sheet must match what /api/settlement returns. Pull live values
     // from v_monthly_settlement and compare against the export cells.
-    let live = sqlx::query!(
-        r#"SELECT recognized_expense AS "r!: rust_decimal::Decimal",
-                  deducted_amount    AS "d!: rust_decimal::Decimal",
-                  settlement_input   AS "s!: rust_decimal::Decimal"
+    let live = SettlementRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT recognized_expense AS r, deducted_amount AS d, settlement_input AS s
            FROM v_monthly_settlement
            WHERE owner_id = $1 AND month = '2026-02-01'"#,
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .expect("v_monthly_settlement row not found");
     let live_recognized: f64 = live.r.to_string().parse().unwrap();
     let live_deducted: f64 = live.d.to_string().parse().unwrap();
     let live_settlement: f64 = live.s.to_string().parse().unwrap();

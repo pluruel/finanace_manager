@@ -34,32 +34,11 @@ pub enum AppError {
     #[error("Payload too large")]
     PayloadTooLarge,
 
-    #[error("Database error: {0}")]
-    Database(sqlx::Error),
-
     #[error("ORM error: {0}")]
     Orm(sea_orm::DbErr),
 
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
-}
-
-/// sqlx::Error → AppError 변환
-/// SQLSTATE 23505 (unique_violation)은 Conflict(409)로 매핑.
-/// 그 외 DB 오류는 Database(500)으로 매핑.
-impl From<sqlx::Error> for AppError {
-    fn from(e: sqlx::Error) -> Self {
-        if let sqlx::Error::Database(ref db_err) = e {
-            // PostgreSQL SQLSTATE 23505 = unique_violation
-            if db_err.code().as_deref() == Some("23505") {
-                return AppError::Conflict(json!({
-                    "error": "duplicate_record",
-                    "message": format!("Duplicate record: {}", db_err.message()),
-                }));
-            }
-        }
-        AppError::Database(e)
-    }
 }
 
 /// sea_orm::DbErr → AppError 변환
@@ -99,11 +78,6 @@ impl IntoResponse for AppError {
             AppError::PayloadTooLarge => {
                 let body = Json(json!({ "detail": "Payload too large" }));
                 (StatusCode::PAYLOAD_TOO_LARGE, body).into_response()
-            }
-            AppError::Database(e) => {
-                tracing::error!("Database error: {:?}", e);
-                let body = Json(json!({ "detail": "Database error" }));
-                (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
             }
             AppError::Orm(e) => {
                 tracing::error!("ORM error: {:?}", e);

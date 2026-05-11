@@ -13,8 +13,10 @@ use finance_manager::import::xlsx::{extract_sheet_name, extract_year_month, pars
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use rust_decimal::Decimal;
-use sea_orm::{ActiveValue::Set, DbErr, EntityTrait, TransactionTrait, sea_query::OnConflict};
-use sqlx::PgPool;
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, DbErr, EntityTrait, FromQueryResult, Statement,
+    TransactionTrait, sea_query::OnConflict,
+};
 use uuid::Uuid;
 
 fn load_golden_bytes() -> Vec<u8> {
@@ -83,7 +85,6 @@ async fn run_import(
 #[tokio::test]
 async fn import_golden_transactions_count() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -112,7 +113,6 @@ async fn import_golden_transactions_count() {
 #[tokio::test]
 async fn import_golden_product_null_count() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -125,14 +125,18 @@ async fn import_golden_product_null_count() {
     // - 메모 없는 행: 63
     // - 메모 있지만 merchant 없는 행: 1 (Row 24: merchant=None, memo 있음)
     // 합계 = 64
-    let null_count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*)::bigint FROM transactions WHERE owner_id = $1 AND product_id IS NULL"#,
-        owner_id
-    )
-    .fetch_one(pool)
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM transactions WHERE owner_id = $1 AND product_id IS NULL"#,
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
     .expect("query failed")
-    .unwrap_or(0);
+    .unwrap();
+    let null_count = row.c;
 
     assert_eq!(
         null_count, 64,
@@ -144,7 +148,6 @@ async fn import_golden_product_null_count() {
 #[tokio::test]
 async fn import_golden_integrity_sql_zero_violations() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -154,9 +157,12 @@ async fn import_golden_integrity_sql_zero_violations() {
         .expect("import failed");
 
     // 그룹 합계 무결성 SQL: 불일치 그룹 0건
-    let violations: i64 = sqlx::query_scalar!(
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"
-        SELECT COUNT(*)::bigint
+        SELECT COUNT(*)::bigint AS c
         FROM (
             SELECT
                 g.group_id,
@@ -174,13 +180,13 @@ async fn import_golden_integrity_sql_zero_violations() {
             HAVING g.header_total <> COALESCE(-SUM(t.amount), 0)
         ) violations
         "#,
-        owner_id,
-        batch_id,
-    )
-    .fetch_one(pool)
+        [owner_id.into(), batch_id.into()],
+    ))
+    .one(&*t.db)
     .await
     .expect("integrity SQL failed")
-    .unwrap_or(0);
+    .unwrap();
+    let violations = row.c;
 
     assert_eq!(
         violations, 0,
@@ -192,7 +198,6 @@ async fn import_golden_integrity_sql_zero_violations() {
 #[tokio::test]
 async fn import_golden_settlement_deducted_amount() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -202,20 +207,25 @@ async fn import_golden_settlement_deducted_amount() {
         .expect("import failed");
 
     // v_monthly_settlement: 2026-02-01, deducted_amount = 7500
-    let row = sqlx::query!(
+    #[derive(FromQueryResult)]
+    struct SettlementRow {
+        recognized_expense: Decimal,
+        deducted_amount: Decimal,
+        settlement_input: Decimal,
+    }
+    let row = SettlementRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         r#"
-        SELECT
-            recognized_expense AS "recognized_expense!: Decimal",
-            deducted_amount     AS "deducted_amount!: Decimal",
-            settlement_input    AS "settlement_input!: Decimal"
+        SELECT recognized_expense, deducted_amount, settlement_input
         FROM v_monthly_settlement
         WHERE owner_id = $1 AND month = '2026-02-01'
         "#,
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .expect("v_monthly_settlement query failed");
+    .expect("v_monthly_settlement query failed")
+    .expect("no settlement row for 2026-02");
 
     let expected_deducted = Decimal::new(7500, 0);
     assert_eq!(
@@ -240,7 +250,6 @@ async fn import_golden_settlement_deducted_amount() {
 #[tokio::test]
 async fn import_duplicate_returns_conflict() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -266,14 +275,18 @@ async fn import_duplicate_returns_conflict() {
     );
 
     // DB 상태 불변: transactions 수 동일
-    let tx_count_after: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*)::bigint FROM transactions WHERE owner_id = $1"#,
-        owner_id
-    )
-    .fetch_one(pool)
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM transactions WHERE owner_id = $1"#,
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
     .expect("count query failed")
-    .unwrap_or(0);
+    .unwrap();
+    let tx_count_after = row.c;
 
     assert_eq!(
         tx_count_after, 177,
@@ -285,7 +298,6 @@ async fn import_duplicate_returns_conflict() {
 async fn import_single_batch_verified() {
     // 단일 트랜잭션 임포트: import_batches가 정확히 1건만 생성됨
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let bytes = load_golden_bytes();
     let filename = "2026년 02월.xlsx";
@@ -294,14 +306,18 @@ async fn import_single_batch_verified() {
         .await
         .expect("import failed");
 
-    let batch_count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*)::bigint FROM import_batches WHERE owner_id = $1"#,
-        owner_id
-    )
-    .fetch_one(pool)
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM import_batches WHERE owner_id = $1"#,
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
     .expect("query failed")
-    .unwrap_or(0);
+    .unwrap();
+    let batch_count = row.c;
 
     assert_eq!(
         batch_count, 1,

@@ -17,7 +17,6 @@ pub struct TestDb {
     /// `DatabaseConnection` non-Clone, and `Drop` types can't be moved out of the
     /// struct's `Drop` impl. Tests use `Arc::clone(&t.db)` to hand it to routers.
     pub db: std::sync::Arc<DatabaseConnection>,
-    pub pool: sqlx::PgPool,
     pub url: String,
     db_name: String,
     admin_url: String,
@@ -53,12 +52,10 @@ impl TestDb {
             .await
             .expect("Migrator::up failed");
 
-        let pool = finance_manager::db::pool_of(&db).clone();
         let db = std::sync::Arc::new(db);
 
         Self {
             db,
-            pool,
             url: test_url,
             db_name,
             admin_url,

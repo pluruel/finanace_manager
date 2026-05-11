@@ -10,7 +10,9 @@ use axum::{
     middleware, routing, Router,
 };
 use finance_manager::auth::AuthUser;
-use sea_orm::DatabaseConnection;
+use sea_orm::{
+    ConnectionTrait, DatabaseBackend, DatabaseConnection, FromQueryResult, Statement,
+};
 use std::sync::Arc;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -41,24 +43,34 @@ fn build_test_router(db: Arc<DatabaseConnection>, owner_id: Uuid) -> Router {
         ))
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+#[derive(FromQueryResult)]
+struct IdRow { id: Uuid }
+
+#[derive(FromQueryResult)]
+struct KindRow { kind: String }
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Happy path: create a category with kind='expense', PATCH to 'income', assert 200 + DB updated.
 #[tokio::test]
 async fn patch_category_kind_flips_value() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let db = Arc::clone(&t.db);
 
     // Create a category with kind='expense'
-    let category_id: Uuid = sqlx::query_scalar!(
+    let category_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .id;
 
     let app = build_test_router(Arc::clone(&db), owner_id);
 
@@ -85,14 +97,16 @@ async fn patch_category_kind_flips_value() {
     assert_eq!(body["kind"], "income");
 
     // Verify the DB row was actually updated
-    let db_kind: String = sqlx::query_scalar!(
+    let db_kind = KindRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "SELECT kind FROM categories WHERE id = $1 AND owner_id = $2",
-        category_id,
-        owner_id
-    )
-    .fetch_one(pool)
+        [category_id.into(), owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .kind;
 
     assert_eq!(db_kind, "income");
 }
@@ -101,18 +115,20 @@ async fn patch_category_kind_flips_value() {
 #[tokio::test]
 async fn patch_category_kind_rejects_invalid_value() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let db = Arc::clone(&t.db);
 
     // Create a category to target
-    let category_id: Uuid = sqlx::query_scalar!(
+    let category_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '식비', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .id;
 
     let app = build_test_router(db, owner_id);
 
@@ -142,18 +158,20 @@ async fn patch_category_kind_rejects_invalid_value() {
 #[tokio::test]
 async fn patch_category_kind_protects_deduction() {
     let t = common::TestDb::new().await;
-    let pool = &t.pool;
     let owner_id = Uuid::new_v4();
     let db = Arc::clone(&t.db);
 
     // Create a 차감 category
-    let category_id: Uuid = sqlx::query_scalar!(
+    let category_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
         "INSERT INTO categories (owner_id, name, kind) VALUES ($1, '차감', 'expense') RETURNING id",
-        owner_id
-    )
-    .fetch_one(pool)
+        [owner_id.into()],
+    ))
+    .one(&*t.db)
     .await
-    .unwrap();
+    .unwrap()
+    .unwrap()
+    .id;
 
     let app = build_test_router(db, owner_id);
 

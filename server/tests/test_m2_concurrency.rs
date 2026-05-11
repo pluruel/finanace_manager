@@ -10,8 +10,9 @@ use finance_manager::entity::{import_batches, prelude::ImportBatches};
 use finance_manager::import::pipeline::run_pipeline;
 use finance_manager::import::normalize::to_norm_key;
 use finance_manager::domain::RawRow;
-use sea_orm::{ActiveValue::Set, EntityTrait, TransactionTrait};
-use sqlx::PgPool;
+use sea_orm::{
+    ActiveValue::Set, DatabaseBackend, EntityTrait, FromQueryResult, Statement, TransactionTrait,
+};
 use std::sync::Arc;
 use tokio::sync::Barrier;
 use uuid::Uuid;
@@ -72,7 +73,6 @@ async fn insert_batch(db: &sea_orm::DatabaseConnection, owner_id: Uuid, suffix: 
 #[tokio::test]
 async fn concurrent_category_upsert_no_duplicate() {
     let t = common::TestDb::new().await;
-    let pool = Arc::new(t.pool.clone());
     let db = t.db.clone(); // Arc<DatabaseConnection>
     let owner_id = Uuid::new_v4();
     let cat_name = format!("concurrency_test_{}", Uuid::new_v4());
@@ -118,15 +118,19 @@ async fn concurrent_category_upsert_no_duplicate() {
     h2.await.unwrap();
 
     let norm = to_norm_key(&cat_name);
-    let count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM categories WHERE owner_id = $1 AND name = $2 AND parent_id IS NULL"#,
-        owner_id,
-        norm,
-    )
-    .fetch_one(&*pool)
+
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM categories WHERE owner_id = $1 AND name = $2 AND parent_id IS NULL"#,
+        [owner_id.into(), norm.into()],
+    ))
+    .one(&*t.db)
     .await
     .unwrap()
-    .unwrap_or(0);
+    .unwrap();
+    let count = row.c;
 
     assert_eq!(count, 1, "Expected exactly 1 category row, got {}", count);
 }
@@ -138,7 +142,6 @@ async fn concurrent_category_upsert_no_duplicate() {
 #[tokio::test]
 async fn concurrent_product_upsert_no_duplicate() {
     let t = common::TestDb::new().await;
-    let pool = Arc::new(t.pool.clone());
     let db = t.db.clone(); // Arc<DatabaseConnection>
     let owner_id = Uuid::new_v4();
 
@@ -194,15 +197,19 @@ async fn concurrent_product_upsert_no_duplicate() {
 
     // Verify exactly 1 product row exists (merchant_id resolved via alias table).
     let norm_memo = to_norm_key(&memo);
-    let count: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) FROM products WHERE owner_id = $1 AND name = $2"#,
-        owner_id,
-        norm_memo,
-    )
-    .fetch_one(&*pool)
+
+    #[derive(FromQueryResult)]
+    struct CountRow { c: i64 }
+    let row = CountRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT COUNT(*)::bigint AS c FROM products WHERE owner_id = $1 AND name = $2"#,
+        [owner_id.into(), norm_memo.into()],
+    ))
+    .one(&*t.db)
     .await
     .unwrap()
-    .unwrap_or(0);
+    .unwrap();
+    let count = row.c;
 
     assert_eq!(count, 1, "Expected exactly 1 product row, got {}", count);
 }
