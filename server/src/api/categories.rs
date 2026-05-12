@@ -148,3 +148,52 @@ pub async fn handle_patch_category_kind(
         kind: body.kind,
     }))
 }
+
+// ── PATCH /api/payment-methods/:id/actor ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct PatchPaymentMethodActorBody {
+    pub actor_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PatchPaymentMethodActorResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub actor_id: Uuid,
+    pub review_state: String,
+}
+
+pub async fn handle_patch_payment_method_actor(
+    State(db): State<Arc<DatabaseConnection>>,
+    ExtractUser(user): ExtractUser,
+    Path(pm_id): Path<Uuid>,
+    Json(body): Json<PatchPaymentMethodActorBody>,
+) -> AppResult<Json<PatchPaymentMethodActorResponse>> {
+    // Verify actor belongs to this owner
+    LedgerActors::find()
+        .filter(ledger_actors::Column::OwnerId.eq(user.sub))
+        .filter(ledger_actors::Column::Id.eq(body.actor_id))
+        .one(&*db)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("actor not found or not owned by user".into()))?;
+
+    // Find the payment method
+    let pm = PaymentMethods::find()
+        .filter(payment_methods::Column::OwnerId.eq(user.sub))
+        .filter(payment_methods::Column::Id.eq(pm_id))
+        .one(&*db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("payment method not found".into()))?;
+
+    let mut active: payment_methods::ActiveModel = pm.into();
+    active.actor_id = Set(Some(body.actor_id));
+    let updated = active.update(&*db).await?;
+
+    Ok(Json(PatchPaymentMethodActorResponse {
+        id: updated.id,
+        name: updated.name,
+        actor_id: body.actor_id,
+        review_state: updated.review_state,
+    }))
+}

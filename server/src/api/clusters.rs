@@ -4,14 +4,14 @@ use axum::{
 };
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseBackend, DatabaseConnection, EntityTrait,
-    FromQueryResult, QueryFilter, Statement, TransactionTrait,
+    FromQueryResult, PaginatorTrait, QueryFilter, Statement, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::entity::{aliases, merchants, products, prelude::{Aliases, Merchants, Products}};
+use crate::entity::{aliases, categories, merchants, products, prelude::{Aliases, Categories, Merchants, Products}};
 
 use crate::auth::ExtractUser;
 use crate::error::{AppError, AppResult};
@@ -70,24 +70,34 @@ struct MemberRow {
 // ── Public scope enum ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
+pub enum Scope {
     Product,
     Merchant,
+    Category,
 }
 
 impl Scope {
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "product" => Some(Self::Product),
             "merchant" => Some(Self::Merchant),
+            "category" => Some(Self::Category),
             _ => None,
         }
     }
-    fn entity_table(self) -> &'static str {
-        match self { Self::Product => "products", Self::Merchant => "merchants" }
+    pub fn entity_table(self) -> &'static str {
+        match self {
+            Self::Product => "products",
+            Self::Merchant => "merchants",
+            Self::Category => "categories",
+        }
     }
-    fn fk_column(self) -> &'static str {
-        match self { Self::Product => "product_id", Self::Merchant => "merchant_id" }
+    pub fn fk_column(self) -> &'static str {
+        match self {
+            Self::Product => "product_id",
+            Self::Merchant => "merchant_id",
+            Self::Category => "category_id",
+        }
     }
 }
 
@@ -240,7 +250,7 @@ pub async fn handle_get_clusters(
     Query(q): Query<ClustersQuery>,
 ) -> AppResult<Json<ClustersResponse>> {
     let scope = Scope::parse(&q.scope).ok_or_else(|| {
-        AppError::BadRequest("scope must be 'product' or 'merchant'".into())
+        AppError::BadRequest("scope must be 'product', 'merchant', or 'category'".into())
     })?;
     let threshold = q.threshold.unwrap_or(DEFAULT_THRESHOLD);
     if !(0.3..=0.9).contains(&threshold) {
@@ -277,7 +287,7 @@ pub async fn handle_post_merge(
     Json(body): Json<MergeRequest>,
 ) -> AppResult<Json<MergeResponse>> {
     let scope = Scope::parse(&body.scope).ok_or_else(|| {
-        AppError::BadRequest("scope must be 'product' or 'merchant'".into())
+        AppError::BadRequest("scope must be 'product', 'merchant', or 'category'".into())
     })?;
     if body.absorb_ids.is_empty() {
         return Err(AppError::BadRequest("absorb_ids must not be empty".into()));
@@ -303,6 +313,22 @@ pub async fn handle_post_merge(
     ))
     .await?;
 
+    // 1b. 차감 보호 (category scope 한정)
+    if scope == Scope::Category {
+        let deduction_count = Categories::find()
+            .filter(categories::Column::OwnerId.eq(owner_id))
+            .filter(categories::Column::Id.is_in(body.absorb_ids.clone()))
+            .filter(categories::Column::Name.eq("차감"))
+            .count(&txn)
+            .await?;
+        if deduction_count > 0 {
+            return Err(AppError::Conflict(serde_json::json!({
+                "error": "deduction_protected",
+                "message": "차감 category cannot be absorbed",
+            })));
+        }
+    }
+
     // 2. Repoint transactions to canonical
     let fk = scope.fk_column();
     let upd_sql = format!(
@@ -326,6 +352,7 @@ pub async fn handle_post_merge(
     let alias_scope = match scope {
         Scope::Product => "product",
         Scope::Merchant => "merchant",
+        Scope::Category => "category",
     };
     let alias_del = Aliases::delete_many()
         .filter(aliases::Column::OwnerId.eq(owner_id))
@@ -348,6 +375,13 @@ pub async fn handle_post_merge(
             Merchants::delete_many()
                 .filter(merchants::Column::OwnerId.eq(owner_id))
                 .filter(merchants::Column::Id.is_in(body.absorb_ids.clone()))
+                .exec(&txn)
+                .await?;
+        }
+        Scope::Category => {
+            Categories::delete_many()
+                .filter(categories::Column::OwnerId.eq(owner_id))
+                .filter(categories::Column::Id.is_in(body.absorb_ids.clone()))
                 .exec(&txn)
                 .await?;
         }

@@ -6,8 +6,9 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AliasesTabContent } from "@/components/aliases-tab-content";
 import { ClusterTab } from "@/components/cluster-tab";
+import { PaymentMethodTab } from "@/components/payment-method-tab";
 
-// The 5 scopes exposed in the UI. Actor is intentionally omitted — only 3 fixed
+// The 6 scopes exposed in the UI. Actor is intentionally omitted — only 3 fixed
 // values and no review_state column.
 const TABS = [
   { value: "category", label: "Category" },
@@ -15,10 +16,11 @@ const TABS = [
   { value: "payment_method", label: "Payment" },
   { value: "product", label: "Product" },
   { value: "cluster", label: "클러스터" },
+  { value: "payment_method_actor", label: "결제수단" },
 ] as const;
 
 type TabScope = (typeof TABS)[number]["value"];
-type ReviewScope = Exclude<TabScope, "cluster">;
+type ReviewScope = Exclude<TabScope, "cluster" | "payment_method_actor">;
 
 // ── Per-tab server fetch ───────────────────────────────────────────────────────
 
@@ -83,6 +85,8 @@ export default function AliasesPage() {
           <TabsContent key={tab.value} value={tab.value} className="mt-4">
             {tab.value === "cluster" ? (
               <ClusterTab />
+            ) : tab.value === "payment_method_actor" ? (
+              <PaymentMethodTab />
             ) : (
               <Suspense
                 fallback={

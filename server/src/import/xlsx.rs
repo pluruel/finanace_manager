@@ -87,8 +87,23 @@ pub fn parse_xlsx(bytes: &[u8], sheet_name: &str) -> Result<Vec<RawRow>> {
     let mut workbook: Xlsx<_> = open_workbook_from_rs(cursor)
         .context("Failed to open xlsx workbook")?;
 
+    // 파일별로 시트명이 "1월" / "01월" 형태로 섞여 있어, 숫자로 일치하는 첫 시트를 찾는다.
+    // (집계 시트는 "01월(집계)" 처럼 괄호가 붙어 있어 자동으로 배제됨.)
+    let resolved_name = sheet_name
+        .strip_suffix('월')
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .and_then(|requested_month| {
+            workbook.sheet_names().into_iter().find(|name| {
+                name.strip_suffix('월')
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .map(|m| m == requested_month)
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or_else(|| sheet_name.to_string());
+
     let range = workbook
-        .worksheet_range(sheet_name)
+        .worksheet_range(&resolved_name)
         .with_context(|| format!("Sheet '{}' not found", sheet_name))?;
 
     let mut rows = Vec::new();
@@ -254,6 +269,23 @@ mod tests {
         // macOS HFS+/APFS stores Korean in NFD; browser sends it as-is
         let nfd = "2026\u{1102}\u{1167}\u{11AB} 02\u{110B}\u{116F}\u{11AF}.xlsx";
         assert_eq!(extract_year_month(nfd), Some((2026, 2)));
+    }
+
+    #[test]
+    fn parse_xlsx_resolves_zero_padded_sheet_name() {
+        // 2020년 01월.xlsx 시트는 "01월" 로 저장되어 있지만
+        // extract_sheet_name 은 "1월" 을 반환한다. parse_xlsx 가 둘을 동치로 처리해야 한다.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("2020년 01월.xlsx");
+        if !path.exists() {
+            // 골든 파일이 없는 환경에서는 스킵 (CI 등)
+            return;
+        }
+        let bytes = std::fs::read(&path).expect("read 2020 file");
+        let rows = parse_xlsx(&bytes, "1월").expect("parse with unpadded sheet name");
+        assert!(rows.len() > 100, "expected >100 data rows, got {}", rows.len());
     }
 
     #[test]

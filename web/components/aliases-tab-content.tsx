@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useTransition, useCallback } from "react";
+import { useState, useTransition, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, Trash2, Merge, Loader2, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Input } from "@/components/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -72,6 +73,17 @@ function Toaster({ toasts }: { toasts: ToastMessage[] }) {
 // Scope string as used by the backend
 type Scope = "category" | "merchant" | "payment_method" | "product";
 
+function proxyUrl(scope: Scope): string | null {
+  switch (scope) {
+    case "category": return "/api/categories-proxy";
+    case "merchant": return "/api/merchants-proxy";
+    case "product": return "/api/products-proxy";
+    default: return null;
+  }
+}
+
+type EntityOption = { id: string; name: string };
+
 // ── MergeDialog ───────────────────────────────────────────────────────────────
 
 function MergeDialog({
@@ -92,12 +104,44 @@ function MergeDialog({
   const [selectedTargetId, setSelectedTargetId] = useState<string>("");
   const [isPending, startTransition] = useTransition();
   const [inlineError, setInlineError] = useState<string | null>(null);
+  const [allEntities, setAllEntities] = useState<EntityOption[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loadingEntities, setLoadingEntities] = useState(false);
+
+  useEffect(() => {
+    if (!open || !item) return;
+    const url = proxyUrl(scope);
+    if (!url) return;
+    const ctrl = new AbortController();
+    setLoadingEntities(true);
+    fetch(url, { signal: ctrl.signal })
+      .then((r) => r.json())
+      .then((data: unknown) => {
+        if (!Array.isArray(data)) return;
+        setAllEntities(
+          (data as { id?: string; name?: string }[])
+            .filter((e): e is EntityOption =>
+              typeof e?.id === "string" &&
+              typeof e?.name === "string" &&
+              e.id !== item.id
+            )
+            .map((e) => ({ id: e.id, name: e.name })),
+        );
+      })
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+      })
+      .finally(() => setLoadingEntities(false));
+    return () => ctrl.abort();
+  }, [open, scope, item]);
 
   // Reset state when dialog opens
   const handleOpenChange = (open: boolean) => {
     if (!open) {
       setSelectedTargetId("");
       setInlineError(null);
+      setSearchQuery("");
+      setAllEntities([]);
       onClose();
     }
   };
@@ -203,18 +247,16 @@ function MergeDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3 py-2">
-          {candidates.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No merge candidates found. The backend did not suggest any similar entities.
-            </p>
-          ) : (
-            <div className="space-y-2">
-              <label htmlFor="merge-target-select" className="text-sm font-medium">
-                Target entity
+        <div className="space-y-4 py-2">
+          {/* 추천 후보 섹션 */}
+          {candidates.length > 0 && (
+            <div className="space-y-1.5">
+              <label htmlFor="merge-target-select" className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                추천 후보
               </label>
               <select
                 id="merge-target-select"
+                aria-label="Target entity"
                 value={selectedTargetId}
                 onChange={(e) => setSelectedTargetId(e.target.value)}
                 className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
@@ -228,6 +270,54 @@ function MergeDialog({
               </select>
             </div>
           )}
+
+          {/* 직접 검색 섹션 */}
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+              직접 검색
+            </label>
+            <Input
+              data-testid="merge-search-input"
+              placeholder="이름으로 검색 (2자 이상)..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+            {searchQuery.length >= 2 && (
+              <div className="border rounded-md overflow-hidden max-h-44 overflow-y-auto">
+                {loadingEntities ? (
+                  <div className="px-3 py-2 text-sm text-muted-foreground">로딩 중...</div>
+                ) : (() => {
+                  const candidateIds = new Set(candidates.map((c) => c.id));
+                  const filtered = allEntities.filter(
+                    (e) =>
+                      !candidateIds.has(e.id) &&
+                      e.name.toLowerCase().includes(searchQuery.toLowerCase()),
+                  );
+                  return filtered.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-muted-foreground">검색 결과 없음</div>
+                  ) : (
+                    filtered.map((e) => (
+                      <button
+                        key={e.id}
+                        type="button"
+                        className={`w-full text-left px-3 py-2 text-sm transition-colors hover:bg-muted ${
+                          selectedTargetId === e.id ? "bg-muted font-medium" : ""
+                        }`}
+                        onClick={() => setSelectedTargetId(e.id)}
+                      >
+                        {e.name}
+                      </button>
+                    ))
+                  );
+                })()}
+              </div>
+            )}
+            {candidates.length === 0 && searchQuery.length < 2 && (
+              <p className="text-xs text-muted-foreground">
+                추천 후보가 없어요. 이름으로 직접 검색하세요.
+              </p>
+            )}
+          </div>
 
           {inlineError && (
             <Alert variant="destructive">
@@ -244,7 +334,7 @@ function MergeDialog({
           </DialogClose>
           <Button
             onClick={handleSubmit}
-            disabled={!selectedTargetId || isPending || candidates.length === 0}
+            disabled={!selectedTargetId || isPending}
           >
             {isPending ? (
               <>
@@ -693,14 +783,12 @@ function ItemRow({
             size="sm"
             variant="outline"
             onClick={onMerge}
-            disabled={item.merge_candidates.length === 0 || item.raw_texts.length === 0}
+            disabled={item.raw_texts.length === 0}
             className="text-xs"
             title={
               item.raw_texts.length === 0
                 ? "No aliases to merge"
-                : item.merge_candidates.length === 0
-                  ? "No merge candidates available"
-                  : "Merge into an existing entity"
+                : "Merge into an existing entity"
             }
           >
             <Merge className="h-3 w-3" />

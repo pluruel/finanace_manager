@@ -5,12 +5,12 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2 } from "lucide-react";
-import { ProductListSchema, MerchantListSchema, type ProductItem, type MerchantItem } from "@/lib/schemas";
+import { ProductListSchema, MerchantListSchema, CategoryListSchema, type ProductItem, type MerchantItem, type CategoryItem } from "@/lib/schemas";
 
-type ListItem = ProductItem | MerchantItem;
+type ListItem = ProductItem | MerchantItem | CategoryItem;
 
 type Props = {
-  scope: "product" | "merchant";
+  scope: "product" | "merchant" | "category";
   onToast: (message: string, variant: "success" | "error") => void;
 };
 
@@ -28,7 +28,11 @@ export function ManualMergePanel({ scope, onToast }: Props) {
     setError(null);
     try {
       const proxyUrl =
-        scope === "product" ? "/api/products-proxy" : "/api/merchants-proxy";
+        scope === "product"
+          ? "/api/products-proxy"
+          : scope === "merchant"
+            ? "/api/merchants-proxy"
+            : "/api/categories-proxy";
       const res = await fetch(proxyUrl, { cache: "no-store" });
       if (!res.ok) {
         setError("목록을 불러오지 못했습니다.");
@@ -42,8 +46,15 @@ export function ManualMergePanel({ scope, onToast }: Props) {
           return;
         }
         setItems(parsed.data);
-      } else {
+      } else if (scope === "merchant") {
         const parsed = MerchantListSchema.safeParse(json);
+        if (!parsed.success) {
+          setError("응답 형식이 올바르지 않습니다.");
+          return;
+        }
+        setItems(parsed.data);
+      } else {
+        const parsed = CategoryListSchema.safeParse(json);
         if (!parsed.success) {
           setError("응답 형식이 올바르지 않습니다.");
           return;
@@ -84,7 +95,13 @@ export function ManualMergePanel({ scope, onToast }: Props) {
     });
   }
 
-  const mergeDisabled = selected.size < 2 || canonicalId === null;
+  const isDeduction =
+    scope === "category" &&
+    items
+      .filter((i) => selected.has(i.id))
+      .some((i) => i.name === "차감");
+
+  const mergeDisabled = selected.size < 2 || canonicalId === null || isDeduction;
 
   let hintText = "";
   if (selected.size === 0) {
@@ -194,6 +211,9 @@ export function ManualMergePanel({ scope, onToast }: Props) {
             })}
           </div>
           <p className="text-xs text-muted-foreground">{hintText}</p>
+          {isDeduction && (
+            <p className="text-xs text-destructive">차감 카테고리는 병합할 수 없습니다.</p>
+          )}
           <Button
             onClick={() => void handleMerge()}
             disabled={mergeDisabled || isMerging}

@@ -316,7 +316,7 @@ export const ClusterSchema = z.object({
 export type Cluster = z.infer<typeof ClusterSchema>;
 
 export const ClustersResponseSchema = z.object({
-  scope: z.enum(["product", "merchant"]),
+  scope: z.enum(["product", "merchant", "category"]),
   threshold: z.number(),
   clusters: z.array(ClusterSchema),
   truncated: z.boolean(),
@@ -329,3 +329,33 @@ export const MergeResponseSchema = z.object({
   aliases_deleted: z.number().int(),
 });
 export type MergeResponse = z.infer<typeof MergeResponseSchema>;
+
+export const CategoryItemSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  kind: z.string(),
+  review_state: z.string(),
+  parent_id: z.string().uuid().nullable(),
+});
+
+export type CategoryItem = z.infer<typeof CategoryItemSchema>;
+
+export const CategoryListSchema = z.array(CategoryItemSchema);
+
+export const PaymentMethodItemSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  actor_id: z.string().uuid().nullable(),
+  actor_name: z.string().nullable().optional(),
+  review_state: z.string(),
+});
+export type PaymentMethodItem = z.infer<typeof PaymentMethodItemSchema>;
+export const PaymentMethodListSchema = z.array(PaymentMethodItemSchema);
+
+export const PatchPaymentMethodActorResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  actor_id: z.string().uuid(),
+  review_state: z.string(),
+});
+export type PatchPaymentMethodActorResponse = z.infer<typeof PatchPaymentMethodActorResponseSchema>;
