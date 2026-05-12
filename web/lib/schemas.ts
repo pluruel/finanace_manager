@@ -316,7 +316,7 @@ export const ClusterSchema = z.object({
 export type Cluster = z.infer<typeof ClusterSchema>;
 
 export const ClustersResponseSchema = z.object({
-  scope: z.enum(["product", "merchant"]),
+  scope: z.enum(["product", "merchant", "category"]),
   threshold: z.number(),
   clusters: z.array(ClusterSchema),
   truncated: z.boolean(),

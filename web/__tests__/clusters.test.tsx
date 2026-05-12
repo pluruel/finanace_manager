@@ -248,4 +248,32 @@ describe("ClusterTab — 카테고리 scope", () => {
       )
     );
   });
+
+  it("추천 모드에서 scope=category 응답을 파싱해 클러스터 카드를 렌더함", async () => {
+    // Regression: ClustersResponseSchema.scope must include "category"
+    mockFetchSequence([
+      // auto-fetch on mount (debounce)
+      { scope: "product", threshold: 0.5, truncated: false, clusters: [] },
+      // after switching to category scope and clicking 다시 계산
+      {
+        scope: "category", threshold: 0.5, truncated: false,
+        clusters: [{
+          members: [
+            { id: "cccccccc-0000-0000-0000-000000000001", name: "식비", txn_count: 10, latest_seen: "2026-02-28" },
+            { id: "cccccccc-0000-0000-0000-000000000002", name: "외식",  txn_count: 4,  latest_seen: "2026-02-20" },
+          ],
+          suggested_canonical_id: "cccccccc-0000-0000-0000-000000000001",
+          avg_similarity: 0.75,
+        }],
+      },
+    ]);
+    render(<ClusterTab />);
+    await new Promise(r => setTimeout(r, 350));
+    // Switch to 카테고리 scope
+    fireEvent.click(screen.getByRole("tab", { name: "카테고리" }));
+    // Trigger recommend fetch
+    fireEvent.click(screen.getByRole("button", { name: /다시 계산/ }));
+    await waitFor(() => expect(screen.queryByText("식비")).not.toBeNull());
+    expect(screen.queryByText("외식")).not.toBeNull();
+  });
 });
