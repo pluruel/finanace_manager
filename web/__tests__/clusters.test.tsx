@@ -227,3 +227,25 @@ describe("ManualMergePanel", () => {
     });
   });
 });
+
+describe("ClusterTab — 카테고리 scope", () => {
+  it("카테고리 탭 버튼이 렌더됨", () => {
+    render(<ClusterTab />);
+    expect(screen.getByRole("tab", { name: "카테고리" })).toBeTruthy();
+  });
+
+  it("카테고리 탭은 수동 모드에서 선택 가능", async () => {
+    render(<ClusterTab />);
+    // switch to 수동 mode
+    fireEvent.click(screen.getByRole("tab", { name: "수동" }));
+    // click 카테고리 tab
+    fireEvent.click(screen.getByRole("tab", { name: "카테고리" }));
+    // ManualMergePanel for category should fetch categories-proxy
+    await waitFor(() =>
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("categories-proxy"),
+        expect.any(Object),
+      )
+    );
+  });
+});

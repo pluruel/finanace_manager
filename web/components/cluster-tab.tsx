@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ClusterRecommendPanel } from "@/components/cluster-recommend-panel";
 import { ManualMergePanel } from "@/components/manual-merge-panel";
 
@@ -43,6 +42,48 @@ function ModeToggle({
       >
         수동
       </button>
+    </div>
+  );
+}
+
+// ── 스코프 토글 버튼 그룹 (상품 / 가맹점 / 카테고리) ────────────────────────
+// 동일한 이유로 plain button으로 구현한다.
+type Scope = "product" | "merchant" | "category";
+
+function ScopeToggle({
+  scope,
+  onChange,
+}: {
+  scope: Scope;
+  onChange: (s: Scope) => void;
+}) {
+  const base =
+    "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2";
+  const active = "bg-background text-foreground shadow-sm";
+  const inactive = "text-muted-foreground";
+  const scopes: { value: Scope; label: string }[] = [
+    { value: "product", label: "상품" },
+    { value: "merchant", label: "가맹점" },
+    { value: "category", label: "카테고리" },
+  ];
+  return (
+    <div
+      role="tablist"
+      aria-label="스코프"
+      className="inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground"
+    >
+      {scopes.map(({ value, label }) => (
+        <button
+          key={value}
+          role="tab"
+          aria-selected={scope === value}
+          className={`${base} ${scope === value ? active : inactive}`}
+          onClick={() => onChange(value)}
+          type="button"
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }
@@ -98,7 +139,7 @@ function Toaster({ toasts }: { toasts: ToastMessage[] }) {
 
 export function ClusterTab() {
   const [mode, setMode] = useState<"recommend" | "manual">("recommend");
-  const [scope, setScope] = useState<"product" | "merchant">("product");
+  const [scope, setScope] = useState<Scope>("product");
   const { toasts, show } = useToast();
 
   return (
@@ -106,16 +147,8 @@ export function ClusterTab() {
       {/* 추천 / 수동 모드 토글 */}
       <ModeToggle mode={mode} onChange={setMode} />
 
-      {/* 상품 / 가맹점 스코프 (두 모드 공유) */}
-      <Tabs
-        value={scope}
-        onValueChange={(v) => setScope(v as "product" | "merchant")}
-      >
-        <TabsList>
-          <TabsTrigger value="product">상품</TabsTrigger>
-          <TabsTrigger value="merchant">가맹점</TabsTrigger>
-        </TabsList>
-      </Tabs>
+      {/* 상품 / 가맹점 / 카테고리 스코프 (두 모드 공유) */}
+      <ScopeToggle scope={scope} onChange={setScope} />
 
       {mode === "recommend" ? (
         <ClusterRecommendPanel scope={scope} onToast={show} />

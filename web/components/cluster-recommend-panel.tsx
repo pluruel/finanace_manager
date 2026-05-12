@@ -7,7 +7,7 @@ import { ClusterCard } from "@/components/cluster-card";
 import { ClustersResponseSchema, type Cluster } from "@/lib/schemas";
 
 type Props = {
-  scope: "product" | "merchant";
+  scope: "product" | "merchant" | "category";
   onToast: (message: string, variant: "success" | "error") => void;
 };
 
