@@ -7,12 +7,14 @@
  * 2. 409 actor_mismatch rendering on a payment-method row.
  * 3. Tab switching state isolation — data for one scope doesn't bleed into
  *    another scope rendered in the same tree.
+ * 4. PaymentMethodTab — actor toggle UI.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AliasesTabContent } from "../components/aliases-tab-content";
+import { PaymentMethodTab } from "../components/payment-method-tab";
 import type { ReviewQueueItem } from "../lib/schemas";
 
 // ── Mock next/navigation ──────────────────────────────────────────────────────
@@ -683,5 +685,148 @@ describe("MergeDialog — 직접 검색", () => {
     ) as HTMLButtonElement | undefined;
     expect(submitBtn).toBeTruthy();
     expect(submitBtn!.disabled).toBe(false);
+  });
+});
+
+// ── Test 7: PaymentMethodTab ──────────────────────────────────────────────────
+
+const ACTOR_엉아_ID = "aaaa1111-0000-0000-0000-000000000001";
+const ACTOR_아기_ID = "bbbb2222-0000-0000-0000-000000000002";
+
+const PM_LIST = [
+  {
+    id: "cc001111-0000-0000-0000-000000000001",
+    name: "신한",
+    actor_id: ACTOR_엉아_ID,
+    actor_name: "엉아",
+    review_state: "confirmed",
+  },
+  {
+    id: "cc002222-0000-0000-0000-000000000002",
+    name: "농협",
+    actor_id: null,
+    actor_name: null,
+    review_state: "pending",
+  },
+];
+
+describe("PaymentMethodTab", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders payment method list", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => PM_LIST,
+    });
+
+    render(<PaymentMethodTab />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("payment-method-list")).toBeTruthy();
+    });
+
+    expect(screen.queryAllByText("신한").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("농협").length).toBeGreaterThan(0);
+  });
+
+  it("shows actor toggle buttons for assigned payment method", async () => {
+    const twoActors = [
+      {
+        id: "cc001111-0000-0000-0000-000000000001",
+        name: "신한",
+        actor_id: ACTOR_엉아_ID,
+        actor_name: "엉아",
+        review_state: "confirmed",
+      },
+      {
+        id: "cc003333-0000-0000-0000-000000000003",
+        name: "하나",
+        actor_id: ACTOR_아기_ID,
+        actor_name: "아기",
+        review_state: "confirmed",
+      },
+    ];
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => twoActors,
+    });
+
+    render(<PaymentMethodTab />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("payment-method-list")).toBeTruthy();
+    });
+
+    // Both actor toggle buttons should be present (from collectActors)
+    expect(screen.queryAllByTestId("actor-toggle-엉아").length).toBeGreaterThan(0);
+    expect(screen.queryAllByTestId("actor-toggle-아기").length).toBeGreaterThan(0);
+  });
+
+  it("optimistic toggle updates actor and calls PATCH", async () => {
+    const twoActors = [
+      {
+        id: "cc001111-0000-0000-0000-000000000001",
+        name: "신한",
+        actor_id: ACTOR_엉아_ID,
+        actor_name: "엉아",
+        review_state: "confirmed",
+      },
+      {
+        id: "cc003333-0000-0000-0000-000000000003",
+        name: "하나",
+        actor_id: ACTOR_아기_ID,
+        actor_name: "아기",
+        review_state: "confirmed",
+      },
+    ];
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => twoActors,
+      })
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: "cc001111-0000-0000-0000-000000000001",
+          name: "신한",
+          actor_id: ACTOR_아기_ID,
+          review_state: "confirmed",
+        }),
+      });
+
+    global.fetch = fetchMock;
+
+    render(<PaymentMethodTab />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("payment-method-list")).toBeTruthy();
+    });
+
+    // Find the 아기 toggle in the first row (신한 is 엉아, click 아기 to switch)
+    const row = screen.getByTestId("payment-method-row-cc001111-0000-0000-0000-000000000001");
+    const 아기Buttons = row.querySelectorAll("[data-testid='actor-toggle-아기']");
+    expect(아기Buttons.length).toBeGreaterThan(0);
+    fireEvent.click(아기Buttons[0]);
+
+    await waitFor(() => {
+      const patchCall = fetchMock.mock.calls.find(
+        ([url, opts]) =>
+          typeof url === "string" &&
+          url.includes("payment-methods-proxy") &&
+          url.includes("actor") &&
+          (opts as RequestInit)?.method === "PATCH",
+      );
+      expect(patchCall).toBeTruthy();
+      const body = JSON.parse((patchCall![1] as RequestInit).body as string);
+      expect(body.actor_id).toBe(ACTOR_아기_ID);
+    });
   });
 });

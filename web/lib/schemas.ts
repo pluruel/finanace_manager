@@ -346,6 +346,7 @@ export const PaymentMethodItemSchema = z.object({
   id: z.string().uuid(),
   name: z.string(),
   actor_id: z.string().uuid().nullable(),
+  actor_name: z.string().nullable().optional(),
   review_state: z.string(),
 });
 export type PaymentMethodItem = z.infer<typeof PaymentMethodItemSchema>;
