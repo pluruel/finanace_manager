@@ -341,3 +341,20 @@ export const CategoryItemSchema = z.object({
 export type CategoryItem = z.infer<typeof CategoryItemSchema>;
 
 export const CategoryListSchema = z.array(CategoryItemSchema);
+
+export const PaymentMethodItemSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  actor_id: z.string().uuid().nullable(),
+  review_state: z.string(),
+});
+export type PaymentMethodItem = z.infer<typeof PaymentMethodItemSchema>;
+export const PaymentMethodListSchema = z.array(PaymentMethodItemSchema);
+
+export const PatchPaymentMethodActorResponseSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string(),
+  actor_id: z.string().uuid(),
+  review_state: z.string(),
+});
+export type PatchPaymentMethodActorResponse = z.infer<typeof PatchPaymentMethodActorResponseSchema>;
