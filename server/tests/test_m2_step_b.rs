@@ -267,6 +267,144 @@ async fn merge_merchant_remaps_transactions() {
     assert!(!src_exists, "source merchant row should have been deleted");
 }
 
+// ── Test 1b: merge_merchant_cascades_products ────────────────────────────────
+// products.merchant_id has a non-cascading FK to merchants.id. The merge path
+// must re-parent products (and merge name-collisions) so the source merchant
+// can be deleted instead of hitting a 23503 FK violation.
+#[tokio::test]
+async fn merge_merchant_cascades_products() {
+    let t = common::TestDb::new().await;
+    let db = Arc::clone(&t.db);
+    let owner_id = Uuid::new_v4();
+
+    let src_merchant_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, 'ｓｓｇ．ｃｏｍ', 'pending') RETURNING id"#,
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+
+    let tgt_merchant_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO merchants (owner_id, name, review_state) VALUES ($1, 'ssg', 'confirmed') RETURNING id"#,
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+
+    // Products under source: one collides with target ("우유"), one is unique ("계란").
+    let src_milk_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO products (owner_id, merchant_id, name, review_state) VALUES ($1, $2, '우유', 'pending') RETURNING id"#,
+        [owner_id.into(), src_merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+    let src_egg_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO products (owner_id, merchant_id, name, review_state) VALUES ($1, $2, '계란', 'pending') RETURNING id"#,
+        [owner_id.into(), src_merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+
+    // Target merchant already has the "우유" product (collision).
+    let tgt_milk_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO products (owner_id, merchant_id, name, review_state) VALUES ($1, $2, '우유', 'confirmed') RETURNING id"#,
+        [owner_id.into(), tgt_merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+
+    // FK satisfaction for a transaction.
+    let cat_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO categories (owner_id, name, kind, review_state) VALUES ($1, '식료품', 'expense', 'pending') RETURNING id"#,
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+    let actor_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO ledger_actors (owner_id, name) VALUES ($1, '공동') RETURNING id"#,
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+    let pm_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO payment_methods (owner_id, name) VALUES ($1, '신한') RETURNING id"#,
+        [owner_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+    let batch_id = insert_batch(&*db, owner_id, "cascade").await;
+
+    // One transaction referencing src_milk (must be remapped to tgt_milk).
+    let raw_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO transactions_raw
+           (owner_id, import_batch_id, row_index, group_id, is_group_header,
+            occurred_on, merchant_text, line_amount)
+           VALUES ($1, $2, 0, gen_random_uuid(), false, '2026-02-01', 'ｓｓｇ．ｃｏｍ', 3000)
+           RETURNING id"#,
+        [owner_id.into(), batch_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO transactions
+           (owner_id, raw_id, group_id, occurred_on, merchant_id, product_id, actor_id, category_id, payment_method_id, amount)
+           VALUES ($1, $2, gen_random_uuid(), '2026-02-01', $3, $4, $5, $6, $7, -3000)"#,
+        [owner_id.into(), raw_id.into(), src_merchant_id.into(), src_milk_id.into(), actor_id.into(), cat_id.into(), pm_id.into()],
+    )).await.unwrap();
+
+    // Source alias to flip the merge path inside POST /api/aliases.
+    let norm_src = to_norm_key("ｓｓｇ．ｃｏｍ");
+    db.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"INSERT INTO aliases (owner_id, scope, raw_text, norm_key, target_id)
+           VALUES ($1, 'merchant', 'ｓｓｇ．ｃｏｍ', $2, $3)"#,
+        [owner_id.into(), norm_src.into(), src_merchant_id.into()],
+    )).await.unwrap();
+
+    let app = build_test_router(Arc::clone(&db), owner_id);
+    let body = serde_json::json!({
+        "scope": "merchant",
+        "raw_text": "ｓｓｇ．ｃｏｍ",
+        "target_id": tgt_merchant_id,
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/aliases")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "merge with cascading products must succeed");
+
+    let resp_body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&resp_body).unwrap();
+    assert_eq!(json["orphan_deleted"], true, "source merchant must be deleted after cascade");
+
+    // Source merchant gone.
+    let src_exists = BoolRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT EXISTS(SELECT 1 FROM merchants WHERE id = $1) AS e"#,
+        [src_merchant_id.into()],
+    )).one(&*db).await.unwrap().unwrap().e;
+    assert!(!src_exists);
+
+    // Colliding source product (src_milk) gone.
+    let src_milk_exists = BoolRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT EXISTS(SELECT 1 FROM products WHERE id = $1) AS e"#,
+        [src_milk_id.into()],
+    )).one(&*db).await.unwrap().unwrap().e;
+    assert!(!src_milk_exists, "colliding src product must be folded into target");
+
+    // Non-colliding source product (src_egg) re-parented to target merchant.
+    let egg_merchant: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT merchant_id AS id FROM products WHERE id = $1"#,
+        [src_egg_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+    assert_eq!(egg_merchant, tgt_merchant_id, "non-colliding product must follow to target merchant");
+
+    // Transaction's product_id remapped to the canonical (target) product.
+    let txn_product_id: Uuid = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        r#"SELECT product_id AS id FROM transactions WHERE raw_id = $1"#,
+        [raw_id.into()],
+    )).one(&*db).await.unwrap().unwrap().id;
+    assert_eq!(txn_product_id, tgt_milk_id, "transaction must point at the surviving target product");
+}
+
 // ── Test 2: merge_product_remaps_product_id ───────────────────────────────────
 
 #[tokio::test]

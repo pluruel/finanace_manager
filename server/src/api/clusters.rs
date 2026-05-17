@@ -362,6 +362,19 @@ pub async fn handle_post_merge(
         .await?;
     let aliases_deleted = alias_del.rows_affected;
 
+    // 3b. Merchant merge: re-parent (or merge-by-name) products under the absorbed
+    //     merchants. products.merchant_id has a non-cascading FK, so this is
+    //     required before the absorbed merchant rows can be deleted in step 4.
+    if scope == Scope::Merchant {
+        crate::api::aliases::cascade_merge_merchant_products(
+            &txn,
+            owner_id,
+            body.absorb_ids.clone(),
+            body.canonical_id,
+        )
+        .await?;
+    }
+
     // 4. Delete absorbed entities themselves
     match scope {
         Scope::Product => {

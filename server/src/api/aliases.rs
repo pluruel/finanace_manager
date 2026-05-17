@@ -155,80 +155,121 @@ pub async fn handle_get_review_queue(
 
 /// Fetch pending entities for a given scope and build review-queue items with
 /// their aliases and merge candidates.
+///
+/// Builds three indexes up front so the per-pending work is bounded by
+/// candidate count instead of full table scans:
+///   - `entity_aliases`:   entity_id → its AliasInfo list (also gives raw_texts directly)
+///   - `norm_to_entities`: norm_key  → entity_ids sharing it (shared-norm-key candidates in O(1))
+///   - `by_len`:           name char-length → indexes into `lowered` (Levenshtein candidates
+///                         pruned to entities within ±1 char of the target name)
 async fn review_queue_for_scope(
     db: &DatabaseConnection,
     owner_id: Uuid,
     scope: &str,
 ) -> Result<Vec<ReviewQueueItem>, AppError> {
+    use std::collections::{HashMap, HashSet};
+
     // Fetch all entities of this scope for this owner (needed for merge candidates too).
-    // We always fetch all, because merge_candidates requires the full list.
     let all_entities = fetch_all_entities(db, owner_id, scope).await?;
 
-    // Fetch all aliases for this scope+owner (to join raw_texts).
+    // Fetch all aliases for this scope+owner.
     let all_aliases_models = Aliases::find()
         .filter(aliases::Column::OwnerId.eq(owner_id))
         .filter(aliases::Column::Scope.eq(scope))
         .all(db)
         .await?;
 
-    let all_aliases: Vec<(Uuid, String, String, Uuid)> = all_aliases_models
+    // ── Index 1+2: per-entity aliases and norm_key reverse index ─────────────
+    let mut entity_aliases: HashMap<Uuid, Vec<AliasInfo>> =
+        HashMap::with_capacity(all_entities.len());
+    let mut norm_to_entities: HashMap<String, Vec<Uuid>> = HashMap::new();
+    for r in all_aliases_models {
+        norm_to_entities
+            .entry(r.norm_key.clone())
+            .or_default()
+            .push(r.target_id);
+        entity_aliases
+            .entry(r.target_id)
+            .or_default()
+            .push(AliasInfo {
+                alias_id: r.id,
+                raw_text: r.raw_text,
+                norm_key: r.norm_key,
+            });
+    }
+    // The same (norm_key, entity) pair can appear via multiple alias rows; dedup so
+    // shared-norm-key lookup doesn't yield duplicate candidate ids.
+    for v in norm_to_entities.values_mut() {
+        v.sort_unstable();
+        v.dedup();
+    }
+
+    // ── Pre-lowercased names + length bucket for Levenshtein pruning ─────────
+    // Carries (id, name, name_lower, kind, review_state) so the outer iteration
+    // stays in fetch_all_entities order (name-sorted) without re-scanning.
+    let lowered: Vec<(Uuid, String, String, Option<String>, String)> = all_entities
         .into_iter()
-        .map(|r| (r.id, r.raw_text, r.norm_key, r.target_id))
+        .map(|(id, name, rs, kind)| {
+            let lower = name.to_lowercase();
+            (id, name, lower, kind, rs)
+        })
         .collect();
 
-    // Only work on pending entities.
-    let pending: Vec<(Uuid, String, Option<String>)> = all_entities
-        .iter()
-        .filter(|(_, _, rs, _)| rs == "pending")
-        .map(|(id, name, _, kind)| (*id, name.clone(), kind.clone()))
-        .collect();
+    let mut by_len: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut name_lens: Vec<usize> = Vec::with_capacity(lowered.len());
+    for (i, t) in lowered.iter().enumerate() {
+        let len = t.2.chars().count();
+        name_lens.push(len);
+        by_len.entry(len).or_default().push(i);
+    }
 
-    let mut items = Vec::with_capacity(pending.len());
+    // ── Build pending items ──────────────────────────────────────────────────
+    let mut items = Vec::new();
+    for (idx, (eid, ename, ename_lower, ekind, rs)) in lowered.iter().enumerate() {
+        if rs != "pending" {
+            continue;
+        }
 
-    for (entity_id, entity_name, entity_kind) in &pending {
-        // Collect aliases that point to this entity.
-        let raw_texts: Vec<AliasInfo> = all_aliases
-            .iter()
-            .filter(|(_, _, _, tid)| tid == entity_id)
-            .map(|(aid, rt, nk, _)| AliasInfo {
-                alias_id: *aid,
-                raw_text: rt.clone(),
-                norm_key: nk.clone(),
-            })
-            .collect();
+        let raw_texts = entity_aliases.remove(eid).unwrap_or_default();
 
-        // norm_keys for this entity (from aliases).
-        let my_norm_keys: Vec<String> = raw_texts.iter().map(|a| a.norm_key.clone()).collect();
+        // Candidate ids via two paths, deduped through a HashSet.
+        let mut cand_ids: HashSet<Uuid> = HashSet::new();
 
-        // Merge candidates: other entities (same owner, same scope, distinct id) that share
-        // any norm_key OR are within Levenshtein ≤ 1 on the canonical name.
-        let entity_name_lower = entity_name.to_lowercase();
-        let merge_candidates: Vec<MergeCandidate> = all_entities
-            .iter()
-            .filter(|(other_id, other_name, _, _)| {
-                if other_id == entity_id {
-                    return false;
+        // (a) Shared norm_key — O(aliases of this entity × bucket size).
+        for a in &raw_texts {
+            if let Some(others) = norm_to_entities.get(&a.norm_key) {
+                for oid in others {
+                    if oid != eid {
+                        cand_ids.insert(*oid);
+                    }
                 }
-                // Shared norm_key: any of the target entity's aliases has the same norm_key.
-                let other_norms: Vec<&str> = all_aliases
-                    .iter()
-                    .filter(|(_, _, _, tid)| tid == other_id)
-                    .map(|(_, _, nk, _)| nk.as_str())
-                    .collect();
+            }
+        }
 
-                let shares_norm_key = my_norm_keys
-                    .iter()
-                    .any(|nk| other_norms.contains(&nk.as_str()));
-
-                if shares_norm_key {
-                    return true;
+        // (b) Levenshtein ≤ 1 on canonical names — only consider names within
+        //     ±1 char length, since |edit_distance| ≥ |len_a - len_b|.
+        let len_e = name_lens[idx];
+        let lens_to_check: [usize; 3] = [len_e.saturating_sub(1), len_e, len_e + 1];
+        for d in lens_to_check {
+            if let Some(idxs) = by_len.get(&d) {
+                for &i in idxs {
+                    let (oid, _, lower_o, _, _) = &lowered[i];
+                    if oid == eid || cand_ids.contains(oid) {
+                        continue;
+                    }
+                    if levenshtein(ename_lower, lower_o) <= 1 {
+                        cand_ids.insert(*oid);
+                    }
                 }
+            }
+        }
 
-                // Levenshtein ≤ 1 on canonical name (case-insensitive).
-                let dist = levenshtein(&entity_name_lower, &other_name.to_lowercase());
-                dist <= 1
-            })
-            .map(|(id, name, _, _)| MergeCandidate {
+        // Materialize merge_candidates in fetch_all_entities order (name-sorted) for
+        // deterministic API responses.
+        let merge_candidates: Vec<MergeCandidate> = lowered
+            .iter()
+            .filter(|(id, _, _, _, _)| cand_ids.contains(id))
+            .map(|(id, name, _, _, _)| MergeCandidate {
                 id: *id,
                 name: name.clone(),
             })
@@ -236,10 +277,10 @@ async fn review_queue_for_scope(
 
         items.push(ReviewQueueItem {
             scope: scope.to_string(),
-            id: *entity_id,
-            name: entity_name.clone(),
+            id: *eid,
+            name: ename.clone(),
             review_state: "pending".to_string(),
-            kind: entity_kind.clone(),
+            kind: ekind.clone(),
             raw_texts,
             merge_candidates,
         });
@@ -454,6 +495,19 @@ pub async fn handle_post_alias(
                 body.target_id,
             )
             .await?;
+
+            // products.merchant_id has a non-cascading FK to merchants.id, so a
+            // merchant merge must re-parent (or merge-by-name) its products before
+            // the source merchant can be deleted.
+            if scope == "merchant" {
+                cascade_merge_merchant_products(
+                    &txn,
+                    owner_id,
+                    vec![old_target_id],
+                    body.target_id,
+                )
+                .await?;
+            }
 
             // Optionally delete the orphaned source entity.
             let orphan_deleted =
@@ -741,6 +795,128 @@ async fn remap_transactions(
         .map_err(AppError::Orm)?;
 
     Ok(result.rows_affected() as i64)
+}
+
+/// When merging merchants, products that hung off the source merchant(s) must follow
+/// to the canonical merchant — otherwise `products_merchant_fk` blocks the orphan
+/// delete. Two cases handled in order:
+///   1. **Name collision** (a product with the same name already exists under the
+///      canonical merchant): remap transactions from the source product to the
+///      canonical product, delete the source product's aliases, then delete the
+///      source product. This is effectively a product-merge induced by the
+///      merchant-merge.
+///   2. **No collision**: simply UPDATE `merchant_id` to the canonical id.
+///
+/// Caller must already hold the merge transaction; this helper does not commit.
+/// Accepts a `Vec<Uuid>` of source merchant ids so the single-alias merge path
+/// (one source) and the cluster bulk merge (N sources) can share one helper.
+pub(crate) async fn cascade_merge_merchant_products(
+    txn: &DatabaseTransaction,
+    owner_id: Uuid,
+    old_merchant_ids: Vec<Uuid>,
+    new_merchant_id: Uuid,
+) -> Result<(), AppError> {
+    if old_merchant_ids.is_empty() {
+        return Ok(());
+    }
+
+    // 1) Remap transactions for products that collide by name with a product on
+    //    the canonical merchant. `t.product_id` becomes the canonical product's id.
+    let remap_tx_sql = r#"
+        UPDATE transactions t SET product_id = c.new_pid
+        FROM (
+            SELECT p_old.id AS old_pid, p_new.id AS new_pid
+            FROM products p_old
+            JOIN products p_new
+              ON p_new.owner_id  = p_old.owner_id
+             AND p_new.name      = p_old.name
+             AND p_new.merchant_id = $1
+            WHERE p_old.owner_id    = $2
+              AND p_old.merchant_id = ANY($3)
+        ) c
+        WHERE t.owner_id = $2 AND t.product_id = c.old_pid
+    "#;
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        remap_tx_sql,
+        [
+            new_merchant_id.into(),
+            owner_id.into(),
+            old_merchant_ids.clone().into(),
+        ],
+    ))
+    .await
+    .map_err(AppError::Orm)?;
+
+    // 2) Delete aliases that pointed at the now-orphaned colliding products.
+    let delete_aliases_sql = r#"
+        DELETE FROM aliases
+        WHERE owner_id = $1
+          AND scope = 'product'
+          AND target_id IN (
+            SELECT p_old.id
+            FROM products p_old
+            JOIN products p_new
+              ON p_new.owner_id  = p_old.owner_id
+             AND p_new.name      = p_old.name
+             AND p_new.merchant_id = $2
+            WHERE p_old.owner_id    = $1
+              AND p_old.merchant_id = ANY($3)
+          )
+    "#;
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        delete_aliases_sql,
+        [
+            owner_id.into(),
+            new_merchant_id.into(),
+            old_merchant_ids.clone().into(),
+        ],
+    ))
+    .await
+    .map_err(AppError::Orm)?;
+
+    // 3) Delete the colliding source products themselves.
+    let delete_products_sql = r#"
+        DELETE FROM products p_old
+        USING products p_new
+        WHERE p_old.owner_id      = $1
+          AND p_old.merchant_id   = ANY($2)
+          AND p_new.owner_id      = p_old.owner_id
+          AND p_new.merchant_id   = $3
+          AND p_new.name          = p_old.name
+    "#;
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        delete_products_sql,
+        [
+            owner_id.into(),
+            old_merchant_ids.clone().into(),
+            new_merchant_id.into(),
+        ],
+    ))
+    .await
+    .map_err(AppError::Orm)?;
+
+    // 4) Re-parent the remaining (non-colliding) products to the canonical merchant.
+    //    Safe under the partial unique index since collisions were already pruned.
+    let remap_products_sql = r#"
+        UPDATE products SET merchant_id = $1
+        WHERE owner_id = $2 AND merchant_id = ANY($3)
+    "#;
+    txn.execute(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        remap_products_sql,
+        [
+            new_merchant_id.into(),
+            owner_id.into(),
+            old_merchant_ids.into(),
+        ],
+    ))
+    .await
+    .map_err(AppError::Orm)?;
+
+    Ok(())
 }
 
 /// Delete the source entity if no alias still points to it and no transaction references it.

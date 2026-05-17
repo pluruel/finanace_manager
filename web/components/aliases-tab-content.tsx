@@ -502,7 +502,9 @@ export function AliasesTabContent({
 
       const raw: unknown = await res.json();
       const parsed = ConfirmEntityResponseSchema.safeParse(raw);
-      // Optimistically remove the confirmed item from pending list regardless of parse result
+      // Optimistically remove the confirmed item from pending list regardless of parse result.
+      // No router.refresh(): confirm only flips this row's review_state and does not affect
+      // other tabs or transactions, so re-fetching all 4 server panels is wasted work.
       removeItem(item.id);
       if (parsed.success) {
         showToast(`"${item.name}" confirmed.`);
@@ -513,7 +515,6 @@ export function AliasesTabContent({
           "error",
         );
       }
-      router.refresh();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Network error", "error");
     } finally {
@@ -547,9 +548,10 @@ export function AliasesTabContent({
   }
 
   function handleDeleteSuccess(entityId: string, aliasId: string) {
+    // Deleting one alias only affects this row's raw_texts; optimistic removeAlias is
+    // sufficient and skipping router.refresh() avoids re-fetching every tab's queue.
     removeAlias(entityId, aliasId);
     showToast("Alias deleted.");
-    router.refresh();
   }
 
   async function handleKindChange(itemId: string, nextKind: "income" | "expense") {
